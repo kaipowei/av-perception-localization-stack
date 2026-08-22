@@ -118,6 +118,53 @@ just "a node ran without crashing."
 
 ---
 
+## 2. Real simulated LiDAR through the unmodified Phase 1 pipeline
+
+**Context.** Phase 1's whole point in using `sensor_msgs/PointCloud2` for the
+synthetic scan was so a real sensor source could later be swapped in without
+touching the processing code. Phase 2 starts by proving that promise true:
+build a small Gazebo world, mount a simulated LiDAR + camera on a vehicle,
+and point Phase 1's `point_cloud_processor_node` at the simulated LiDAR's
+topic instead of the synthetic one.
+
+**Action.**
+
+- `sim/worlds/test_track.sdf`: a 30x30m enclosed world (ground plane + four
+  wall boxes) with two obstacle boxes placed at the same coordinates as
+  Phase 1's synthetic blobs, so the two data sources are visually and
+  numerically comparable. A `vehicle` model (a plain box chassis — no
+  drivetrain yet, that comes with actual driving in a later step) carries
+  two sensors: a `gpu_lidar` (640 horizontal x 16 vertical samples, 360
+  degrees, matching a small automotive-style LiDAR) and a `camera`.
+- Confirmed the simulator layer works on its own first, before touching
+  ROS2 at all: ran `gz sim -s -r --headless-rendering` (server-only, no
+  window — WSL2 has no display by default) and used `gz topic -e` to
+  read a raw LiDAR message directly from Gazebo's own transport layer.
+- Bridged `/lidar/points` into ROS2 with `ros_gz_bridge`'s
+  `parameter_bridge`:
+  `/lidar/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked`
+  — this one line is the entire translation from Gazebo's own message
+  type to the ROS2 message type Phase 1's node already expects.
+- Ran `point_cloud_processor_node` completely unmodified, just remapped at
+  launch time (`--ros-args -r points_raw:=/lidar/points`) so it subscribes
+  to the bridged LiDAR topic instead of the synthetic source node.
+
+**Result.**
+
+```
+10240 -> 1464 points (voxel_size=0.30) in 2.676 ms on GPU
+```
+
+10240 = 640 x 16, exactly the horizontal x vertical sample counts set in the
+LiDAR's SDF definition — confirms the scan pattern is configured as
+intended. The GPU downsample ran in 2.676ms with zero source changes to the
+Phase 1 code, only a topic remap: proof that treating `PointCloud2` as the
+hard boundary between "wherever the points come from" and "what happens to
+them" actually pays off once a second data source (Gazebo, after only
+synthetic data) shows up.
+
+---
+
 ## 2. Installing CUDA hit a wall that had nothing to do with this project
 
 **Context.** Before writing the GPU kernel, the CUDA compiler (`nvcc`)

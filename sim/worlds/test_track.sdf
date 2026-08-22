@@ -1,0 +1,153 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <world name="test_track">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"></plugin>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"></plugin>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"></plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>30 30</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>30 30</size></plane></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- perimeter walls, matching the 20x20m ground extent used in Phase 1's
+         synthetic scan so the two datasets are visually/numerically comparable -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 15 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>30 0.2 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>30 0.2 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -15 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>30 0.2 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>30 0.2 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_east">
+      <static>true</static>
+      <pose>15 0 0.5 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>30 0.2 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>30 0.2 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-15 0 0.5 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>30 0.2 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>30 0.2 1</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <!-- obstacles at the same coordinates as the Phase 1 synthetic blobs -->
+    <model name="obstacle_1">
+      <static>true</static>
+      <pose>3 2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1 1 1</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1 1 1</size></box></geometry>
+          <material><ambient>0.8 0.3 0.1 1</ambient><diffuse>0.8 0.3 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="obstacle_2">
+      <static>true</static>
+      <pose>-4 -3 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.8 0.8 1.5</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.8 0.8 1.5</size></box></geometry>
+          <material><ambient>0.8 0.3 0.1 1</ambient><diffuse>0.8 0.3 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="vehicle">
+      <pose>0 0 0.2 0 0 0</pose>
+      <link name="chassis">
+        <inertial>
+          <mass>50</mass>
+          <inertia><ixx>1</ixx><iyy>1</iyy><izz>1</izz></inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry><box><size>1.5 0.8 0.4</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.5 0.8 0.4</size></box></geometry>
+          <material><ambient>0.2 0.2 0.8 1</ambient><diffuse>0.2 0.2 0.8 1</diffuse></material>
+        </visual>
+
+        <sensor name="lidar" type="gpu_lidar">
+          <pose>0.5 0 0.3 0 0 0</pose>
+          <topic>lidar</topic>
+          <update_rate>10</update_rate>
+          <lidar>
+            <scan>
+              <horizontal>
+                <samples>640</samples>
+                <resolution>1</resolution>
+                <min_angle>-3.14159</min_angle>
+                <max_angle>3.14159</max_angle>
+              </horizontal>
+              <vertical>
+                <samples>16</samples>
+                <resolution>1</resolution>
+                <min_angle>-0.2618</min_angle>
+                <max_angle>0.2618</max_angle>
+              </vertical>
+            </scan>
+            <range>
+              <min>0.1</min>
+              <max>30</max>
+              <resolution>0.01</resolution>
+            </range>
+          </lidar>
+          <always_on>true</always_on>
+          <visualize>false</visualize>
+        </sensor>
+
+        <sensor name="camera" type="camera">
+          <pose>0.75 0 0.3 0 0 0</pose>
+          <topic>camera</topic>
+          <update_rate>15</update_rate>
+          <camera>
+            <horizontal_fov>1.396</horizontal_fov>
+            <image><width>640</width><height>480</height></image>
+            <clip><near>0.1</near><far>50</far></clip>
+          </camera>
+          <always_on>true</always_on>
+        </sensor>
+      </link>
+    </model>
+  </world>
+</sdf>
