@@ -24,16 +24,23 @@ double as interview prep material.
 
 ## Status
 
-Just started. Phase 1 (C++17 ROS2 package + CUDA point-cloud processing) in
-progress.
+Phase 1 complete: a C++17 ROS2 package with a native-CMake CUDA voxel-grid
+downsampler, correctness-checked against a CPU reference implementation and
+benchmarked (GPU wins above ~100k points; loses below that to launch/
+transfer overhead), wired into a live source → processor node pipeline.
+See [docs/learning-log.md](docs/learning-log.md) for the full story,
+including why the dev environment ended up as Ubuntu 24.04 + ROS2 Jazzy +
+CUDA 12.6 specifically. Phase 2 (Gazebo-simulated LiDAR, ground
+segmentation, clustering) is next.
 
 ## Requirements
 
-- ROS2 (developed against the Lyrical distro)
+- ROS2 Jazzy
 - PCL (Point Cloud Library) 1.12+
 - colcon
-- CUDA toolkit (for the GPU-accelerated processing nodes)
-- Developed and run inside WSL2 Ubuntu on Windows
+- CUDA toolkit 12.6 (for the GPU-accelerated processing nodes)
+- Developed and run inside WSL2 Ubuntu 24.04 on Windows — see the learning
+  log for why this specific combination
 
 ## Build
 

@@ -115,3 +115,171 @@ generation counts exactly. The z bound of 1.15 matches the second obstacle
 blob's center height (0.75) plus its radius (0.4) — not a coincidental
 number, confirmation the geometry is generated and read back correctly, not
 just "a node ran without crashing."
+
+---
+
+## 2. Installing CUDA hit a wall that had nothing to do with this project
+
+**Context.** Before writing the GPU kernel, the CUDA compiler (`nvcc`)
+needed installing on top of the WSL2 Ubuntu (distro: Lyrical) environment
+from Entry 0. The GPU driver being visible (`nvidia-smi` works) is not the
+same thing as having the *toolkit* to compile CUDA code — that's a separate
+install from NVIDIA's own apt repository.
+
+**Action.** Installed CUDA 12.6 via NVIDIA's `wsl-ubuntu` apt repo (the
+WSL-specific one — it doesn't touch the GPU driver, which WSL2 gets from
+Windows, not from Linux). Wrote a tiny "add two float arrays" `.cu` file to
+smoke-test it before touching real project code.
+
+**Result.** It didn't compile. Three attempts, in order:
+
+1. CUDA 12.6 refused to compile at all — its bundled math headers declare
+   functions (`cospi`, `sinpi`, `rsqrt`) with an exception specification
+   that conflicts with how this system's very new glibc (Lyrical runs on
+   Ubuntu 26.04, released days before this) declares the same functions.
+   Tried an older host compiler (`g++-13`, since CUDA 12.6 caps at GCC 13
+   and the system default is GCC 15) — same error, so it wasn't a compiler
+   version problem.
+2. Tried CUDA 12.9 instead, on the theory that a newer release might have
+   updated headers — identical error. Not a version problem either.
+3. Tried disabling the glibc language extensions that expose those
+   particular function declarations (`-D_POSIX_C_SOURCE=200809L`,
+   `-D_XOPEN_SOURCE=700`) and strict `-std=c++17` — still identical.
+
+Three independent fixes failing identically is strong evidence this isn't
+a flag I'm missing — it's a genuine, currently-unresolved incompatibility
+between every CUDA release through 12.9 and a glibc newer than any of them
+were tested against. Ubuntu 26.04 is bleeding-edge; CUDA's officially
+validated distros are 22.04/24.04 LTS. Lesson: when a brand-new OS release
+and a vendor toolkit disagree, the toolkit's compatibility matrix wins —
+don't fight it, switch to what's actually validated.
+
+---
+
+## 3. Standing up a second, CUDA-validated environment
+
+**Context.** Rather than keep fighting Ubuntu 26.04, installed a second
+WSL distro — Ubuntu 24.04, one of the versions NVIDIA actually tests CUDA
+against — dedicated to this project.
+
+**Action.** `wsl --install -d Ubuntu-24.04`, then CUDA 12.6 the same way as
+before. This time `nvcc` compiled and ran the smoke test cleanly on the
+first try — GCC 13.3 is the *default* compiler on 24.04, already inside
+CUDA 12.6's supported range, no workaround needed. Confirmed with a real
+GPU compute test, not just "the compiler exists": summed two arrays of
+2^20 floats on the GPU, checked every element came back correct.
+
+**Result.** CUDA works. But now the environment is split: ROS2 lives only
+in the 26.04 distro, CUDA only works in the 24.04 one. First approach:
+compile the CUDA kernel as a standalone shared library (`.so`) in 24.04
+with the CUDA runtime statically linked in (`--cudart static`), so it only
+depends on `libcuda.so` — the GPU driver's userspace library, which both
+WSL distros share via `/usr/lib/wsl/lib` since it's provided by the single
+Windows host driver, not by either Linux install. Verified this actually
+works: compiled a plain C++ test program with `g++` in the 26.04 distro
+(no CUDA toolkit needed there at all) that linked against and called into
+the `.so` built in 24.04. It worked — cross-distro linking through a shared
+GPU driver library is a real, valid pattern.
+
+It was also more architecture than the problem needed. Asked whether ROS2
+(Jazzy, the release that officially targets Ubuntu 24.04) could just be
+installed *inside* the already-working CUDA distro instead of bridging two
+environments — yes, and that's obviously better: one build, one
+environment, and Phase 2/3 won't have to repeat this dance for every future
+CUDA-touching node. Installed ROS2 Jazzy + PCL in Ubuntu 24.04 and made it
+the single dev environment for this project going forward. 26.04/Lyrical
+now belongs entirely to the unrelated `friction-aware-planner` project and
+this repo doesn't touch it again. The cross-distro validation wasn't wasted
+effort — it proved the CUDA library itself was correct before the
+architecture even mattered — but the lesson worth keeping is to check
+"what does everyone else actually do" before building a bridge for a
+problem that a simpler environment choice avoids entirely.
+
+---
+
+## 4. The voxel-grid downsampler, and getting it to build alongside ROS2
+
+**Context.** The first real GPU workload: voxel-grid downsampling, the
+standard first step in almost every LiDAR pipeline. A raw scan can be
+hundreds of thousands of points; before doing anything else with it
+(ground segmentation, clustering — Phase 2), the point count needs cutting
+down without losing the scene's shape. The standard way: divide space into
+a grid of cubes ("voxels") of a fixed size, and keep at most one point per
+occupied cube.
+
+**Action.** Implemented the same voxel-bucketing rule twice — once for CPU,
+once for GPU — sharing the actual bucketing math (`voxel_key.hpp`) between
+them so a CPU/GPU disagreement can only mean a real bug, not two different
+definitions of "which voxel is this point in." Packs each point's grid
+cell into a single 64-bit integer key (20 bits per axis).
+
+- **CPU version**: builds a hash map from voxel key to "first point index
+  seen for that key" — an `unordered_map` walk, one pass over the points.
+- **GPU version**: no hash map (GPU-friendly hash tables are a real research
+  topic on their own — not worth building from scratch for this). Instead:
+  compute every point's key in parallel, then use Thrust (CUDA's built-in
+  STL-like library) to sort points by key and keep the first of each run of
+  equal keys. Sorting turns "group by voxel" into a problem GPUs are
+  already extremely good at, which is the actual reason this design was
+  chosen over hand-rolling a parallel hash table.
+
+Getting this to build *inside* the ROS2 package (rather than as a separate
+manually-invoked script, now that ROS2 + CUDA are in the same environment)
+took three more CMake fixes, found by reading the actual failure each time
+rather than guessing:
+
+1. PCL's own CMake config pulls in VTK, whose config expects an
+   `MPI::MPI_C` target to already exist — even though `libopenmpi-dev` was
+   already installed, CMake still needs an explicit `find_package(MPI)`
+   call to create that target, and it has to run *before*
+   `find_package(pcl_conversions)`, because `pcl_conversions` triggers
+   PCL's own `find_package(PCL)` as a side effect.
+2. That `find_package(MPI)` call silently found nothing useful at first —
+   CMake's FindMPI only searches for components matching the project's own
+   *enabled languages*, and the project only declared `CXX` and `CUDA`, not
+   `C`. Fixed by adding `C` to `project(... LANGUAGES C CXX CUDA)`.
+3. `pcl_conversions` turned out to be header-only on this ROS2 release
+   (Jazzy) and exports no CMake target at all — just a variable,
+   `pcl_conversions_INCLUDE_DIRS`. On the other ROS2 release used in Entry
+   1 (Lyrical) it *does* export a target. Made the `CMakeLists.txt` handle
+   both: link the target only `if(TARGET pcl_conversions::pcl_conversions)`,
+   and always add `${pcl_conversions_INCLUDE_DIRS}` explicitly so the
+   headers are found either way.
+
+**Result.** Correctness: CPU and GPU produce the *exact same output point
+count* at every tested size (9883 / 88622 / 285625 / 367047 points at 10k /
+100k / 500k / 1M input points) — since both use the identical bucketing
+rule, the count of occupied voxels is a strict invariant, so an exact match
+is a real correctness check, not a coincidence.
+
+Performance (RTX 4060 Laptop GPU, Release build, `voxel_size=0.2`):
+
+| points | CPU | GPU | speedup |
+|---|---|---|---|
+| 10,000 | 0.85 ms | 3.46 ms | 0.25x (GPU *slower*) |
+| 100,000 | 8.98 ms | 5.25 ms | 1.71x |
+| 500,000 | 60.0 ms | 16.8 ms | 3.58x |
+| 1,000,000 | 127.5 ms | 28.2 ms | 4.52x |
+
+Below roughly 50-100k points, GPU loses — kernel-launch and host↔device
+memory-transfer overhead costs more than the compute saves. Above that, it
+wins by a growing margin. This crossover is the actual finding, not "GPU is
+faster" — a real LiDAR scan (tens of thousands to a few hundred thousand
+points) sits right around where this decision matters, which is the honest
+answer to "why GPU-accelerate this."
+
+Wired the downsampler into `point_cloud_processor_node`: it now calls
+`voxel_downsample` on every incoming scan and republishes the result on
+`points_downsampled`. Live, on real ROS2 traffic: 8700 points in, ~6800-6837
+out, 2.4-3.1 ms per frame — comfortably inside the 100 ms budget a 10 Hz
+source allows. The very first call cost ~400 ms (CUDA's one-time lazy
+context initialization), which would have made the first frame look like a
+bug; added a throwaway warm-up call to the node's constructor to absorb
+that cost before real data ever arrives, which is a detail worth
+remembering to reproduce for the SLAM/localization node in Phase 3, since
+it will call into CUDA too.
+
+**Phase 1 is now complete**: a C++17 ROS2 package with a native-CMake-built
+CUDA voxel downsampler, correctness-verified against an independent CPU
+implementation, benchmarked with an honest (not cherry-picked) result, and
+wired into a live two-node pipeline.
