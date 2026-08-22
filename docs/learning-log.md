@@ -247,6 +247,63 @@ tuning `min_cluster_size` up until it disappears from the log.
 
 ---
 
+## 4. Camera + YOLO — why a colored box will never work, and what fixed it once it did
+
+**Context.** The plan was 2D detection on the camera feed as a loose
+companion to the LiDAR obstacle detector. The two Gazebo obstacle boxes
+from section 3 are plain colored boxes with no real-world geometry, and a
+COCO-pretrained YOLO model recognizes objects mostly by silhouette/shape,
+not surface color — texture-mapping a photo onto a cube's UV-unwrapped
+faces wouldn't fix this either, since the *shape* still reads as a cube,
+and a stretched/distorted texture is arguably a worse input than a plain
+color. Rather than build the node and discover an empty detection log,
+this was flagged before writing any code, and the fix was to add a model
+with real geometry: `Standing person` from Gazebo Fuel (OpenRobotics),
+found via the Fuel search API since `gz fuel list` has no keyword search
+and guessing the exact model name ("Person standing") 404'd — the real
+name was "Standing person". Downloaded with `gz fuel download` and placed
+in the world via `<include><uri>https://fuel.gazebosim.org/...</uri></include>`,
+which resolves against the already-downloaded local Fuel cache. Before
+writing the detector node, saved and looked at one actual camera frame
+(`sim/save_one_frame.py`, a throwaway script, not part of the package) to
+confirm the model renders as a recognizable human silhouette rather than
+debugging a detector against a scene that might not even look right.
+
+**Action.** New package `fa_perception_py` (ament_python — Python and C++
+ROS2 nodes are conventionally kept in separate packages rather than mixed
+into one build system). `yolo_detector_node.py` subscribes to the camera
+topic, runs a pretrained `yolov8n.pt` (Ultralytics) on each frame, and
+publishes `vision_msgs/Detection2DArray`. Deliberately *not* fused with the
+LiDAR detector yet — this proves the camera path independently first.
+
+**Result — a second real environment conflict.** First run segfaulted
+inside `cv_bridge`'s C++ image-conversion code. Root cause: `cv_bridge` is
+a compiled ROS2 (apt) package built against NumPy's 1.x C ABI; installing
+`ultralytics` via pip pulled in NumPy 2.5.2 as a dependency, and NumPy 2.x
+broke binary compatibility with modules compiled against 1.x — a
+well-known class of problem when mixing apt-installed ROS2 packages with
+pip-installed ML packages in the same Python environment. Fixed by pinning
+`numpy<2` (`1.26.4`) after the fact; pip warned that the pip-installed
+`opencv-python` "requires numpy>=2", but that constraint turned out to be
+overly conservative — both `cv_bridge` and `cv2` imported and worked fine
+against 1.26.4 in practice.
+
+**Final result**, run against the live simulated camera feed:
+
+```
+person (0.78) at [309, 71, 352, 302]
+```
+
+— repeated consistently across every frame while the node ran, confidence
+0.78, bounding box coordinates consistent with the person's on-screen
+position. Confirms the camera -> YOLO -> ROS2 message path works end to
+end against a model with real geometry, and confirms (by contrast with
+section 3, where the same detector code produces 0 detections on the
+colored obstacle boxes) that the earlier "a box won't be recognized"
+prediction was correct rather than just a guess.
+
+---
+
 ## 2. Installing CUDA hit a wall that had nothing to do with this project
 
 **Context.** Before writing the GPU kernel, the CUDA compiler (`nvcc`)

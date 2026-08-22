@@ -92,6 +92,14 @@
       </link>
     </model>
 
+    <!-- real-geometry model (not a colored box) so the camera node has
+         something a COCO-trained detector can actually recognize -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing person</uri>
+      <name>pedestrian</name>
+      <pose>4 0 0 0 0 0</pose>
+    </include>
+
     <model name="vehicle">
       <pose>0 0 0.2 0 0 0</pose>
       <link name="chassis">
