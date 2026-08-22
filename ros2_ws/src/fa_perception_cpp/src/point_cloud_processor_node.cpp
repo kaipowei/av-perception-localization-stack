@@ -1,6 +1,7 @@
 #include <chrono>
 #include <vector>
 
+#include <pcl/filters/filter.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -16,6 +17,7 @@ public:
   : Node("point_cloud_processor_node")
   {
     voxel_size_ = declare_parameter("voxel_size", 0.2);
+    min_range_ = declare_parameter("min_range", 1.0);
 
     // The first CUDA call in a process pays for lazy context init (hundreds
     // of ms) -- absorb that here so the first real point cloud isn't the
@@ -35,6 +37,25 @@ private:
   {
     pcl::PointCloud<pcl::PointXYZ> cloud;
     pcl::fromROSMsg(*msg, cloud);
+
+    // Real LiDAR data has NaN points where a ray never hit anything (e.g.
+    // an upward-angled beam that clears the walls into open sky) --
+    // Phase 1's synthetic scan never produced these, so this only showed up
+    // once a real simulated sensor was wired in.
+    std::vector<int> valid_indices;
+    pcl::removeNaNFromPointCloud(cloud, cloud, valid_indices);
+
+    // Points are already in the LiDAR's own frame, so distance from the
+    // origin here IS distance from the sensor -- cheap way to drop hits on
+    // the vehicle's own chassis without needing its exact geometry.
+    pcl::PointCloud<pcl::PointXYZ> range_filtered;
+    range_filtered.points.reserve(cloud.points.size());
+    for (const auto & p : cloud.points) {
+      const double r2 = static_cast<double>(p.x) * p.x + static_cast<double>(p.y) * p.y + static_cast<double>(p.z) * p.z;
+      if (r2 >= min_range_ * min_range_) {range_filtered.points.push_back(p);}
+    }
+    cloud = range_filtered;
+
     const int in_count = static_cast<int>(cloud.points.size());
 
     std::vector<float> in_xyz(in_count * 3);
@@ -72,6 +93,7 @@ private:
   }
 
   double voxel_size_;
+  double min_range_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
 };

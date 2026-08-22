@@ -22,12 +22,13 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 # PCL's exported VTK config expects an MPI::MPI_C target to already exist;
 # find it explicitly before anything that transitively pulls in PCL/VTK
 # (pcl_conversions does, as a side effect of its own find_package(PCL) call).
 find_package(MPI REQUIRED)
 find_package(pcl_conversions REQUIRED)
-find_package(PCL 1.12 REQUIRED COMPONENTS common)
+find_package(PCL 1.12 REQUIRED COMPONENTS common segmentation filters sample_consensus search kdtree)
 find_package(CUDAToolkit REQUIRED)
 
 # pcl_conversions is header-only and exports a real CMake target on some
@@ -74,9 +75,20 @@ target_link_libraries(point_cloud_processor_node
 )
 target_include_directories(point_cloud_processor_node PRIVATE ${PCL_INCLUDE_DIRS} ${pcl_conversions_INCLUDE_DIRS})
 
+add_executable(obstacle_detector_node src/obstacle_detector_node.cpp)
+target_link_libraries(obstacle_detector_node
+  rclcpp::rclcpp
+  sensor_msgs::sensor_msgs
+  visualization_msgs::visualization_msgs
+  ${EXTRA_PCL_CONVERSIONS_LIB}
+  ${PCL_LIBRARIES}
+)
+target_include_directories(obstacle_detector_node PRIVATE ${PCL_INCLUDE_DIRS} ${pcl_conversions_INCLUDE_DIRS})
+
 install(TARGETS
   point_cloud_source_node
   point_cloud_processor_node
+  obstacle_detector_node
   benchmark_voxel
   DESTINATION lib/${PROJECT_NAME}
 )

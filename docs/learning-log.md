@@ -165,6 +165,88 @@ synthetic data) shows up.
 
 ---
 
+## 3. Ground segmentation + clustering — and what real sensor data breaks that synthetic data never did
+
+**Context.** Raw/downsampled points aren't obstacles yet — the next step is
+telling "flat ground I can drive over" apart from "solid thing I can't,"
+then grouping the solid points into individual objects with a position and
+size. This is also the first time the pipeline touched *real* simulated
+sensor output end to end instead of hand-generated data, and that exposed
+two problems Phase 1's synthetic scan was too clean to ever surface.
+
+**Action.**
+
+- `obstacle_detector_node.cpp`: `pcl::SACSegmentation` (RANSAC) fits the
+  single largest plane in the downsampled cloud and removes it — good
+  enough here because the test track has exactly one dominant flat
+  surface (the ground), not a general solution for slopes/curbs/multiple
+  ground planes.
+- The remaining "non-ground" points go through
+  `pcl::EuclideanClusterExtraction` (distance-based grouping via a KD-tree)
+  to split them into per-object clusters; each cluster gets a bounding box
+  computed with `pcl::getMinMax3D` and published as a `visualization_msgs`
+  `MarkerArray` for RViz, plus logged.
+
+**Result — first crash, and why.** First run crashed inside PCL's KD-tree
+radius search on a `NaN`-coordinate point. Root cause: this world has no
+ceiling, and the LiDAR's vertical FOV (+/-15 degrees) means upward-angled
+rays fired at anything other than very close range fly out over the 1m
+walls into open sky and never hit anything within the 30m max range —
+Gazebo reports those "no return" rays as `NaN` points. Phase 1's synthetic
+scan was hand-generated and could never produce this; it only showed up the
+moment a real (simulated) sensor entered the pipeline. Fixed by calling
+`pcl::removeNaNFromPointCloud` on the raw cloud before it ever reaches the
+GPU downsampler.
+
+**Result — second problem, not a crash but wrong output.** With the crash
+fixed, detection found 7 clusters, not 2. Two of them (with LiDAR-visible
+size and position close to obstacle_1 at (3, 2) and obstacle_2 at (-4, -3))
+were real. The other five weren't:
+
+- Four ~20-30m, wafer-thin clusters — the perimeter walls. They're flat
+  like the ground, but *vertical*, so the single-largest-plane removal
+  (which only looks for one plane, and picks the biggest one — the floor)
+  never touches them; they survive into "non-ground" and get clustered as
+  if they were obstacles.
+- One cluster roughly the size and position of the vehicle's own chassis
+  (1.36 x 0.77m, centered near the sensor origin) — the LiDAR seeing its
+  own vehicle body, a standard self-occlusion problem every real LiDAR
+  integration has to handle.
+
+**Fix.** Two independent filters, each solving a different half of the
+problem:
+
+1. In `point_cloud_processor_node`, drop any point within `min_range`
+   (default 1.0m) of the sensor origin — cheap and correct here because the
+   cloud is already expressed in the LiDAR's own frame, so distance from
+   the origin *is* distance from the sensor. Removes the self-detection
+   cluster.
+2. In `obstacle_detector_node`, discard any cluster whose x or y extent
+   exceeds `max_obstacle_extent` (default 3.0m) — real obstacles on this
+   track are known to be under 1.5m; anything bigger is almost certainly a
+   wall segment. This is a track-specific heuristic, not a general
+   wall-detector — a real system would fit *all* dominant planes, not just
+   the biggest one, and classify each by its normal vector (near-vertical
+   normal = wall, near-horizontal = ground).
+
+**Final result:**
+
+```
+cluster 0: 130 points, center (2.49, 1.96, 0.02), size (0.98 x 0.93 x 0.95)
+cluster 1: 91 points, center (-4.48, -2.95, 0.27), size (0.76 x 0.72 x 1.44)
+cluster 2: 6 points, center (-1.11, 0.05, -0.10), size (0.05 x 0.70 x 0.05)
+```
+
+Clusters 0 and 1 match obstacle_1 (3, 2, 1x1x1) and obstacle_2 (-4, -3,
+0.8x0.8x1.5) — the detected center is offset from the true box center
+because the LiDAR only ever sees the near-facing surface, not the far side
+of a solid object, which is the expected physical limitation, not an error.
+Cluster 2 is a small (6-point) leftover, most likely a sliver the min-range
+filter didn't fully catch — left in and reported honestly rather than
+tuning `min_cluster_size` up until it disappears from the log.
+
+---
+
 ## 2. Installing CUDA hit a wall that had nothing to do with this project
 
 **Context.** Before writing the GPU kernel, the CUDA compiler (`nvcc`)
