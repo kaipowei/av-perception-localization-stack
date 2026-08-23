@@ -366,6 +366,71 @@ metadata in bag directory" until it was actually stopped properly.
 
 ---
 
+## 6. Chasing a choppy demo video — three wrong guesses before the real cause
+
+**Context.** Wanted a short video of what the camera and LiDAR actually see
+(as opposed to Gazebo's third-person GUI view), for a portfolio keepsake.
+Built `sim/capture_sensor_views.py`: subscribes to `/camera` and
+`/lidar/points`, saves a JPEG per camera frame and a top-down render per
+LiDAR scan, then `ffmpeg` turns each frame sequence into an mp4. First
+attempt (scripted `drive_loop.py`, headless, 25s) produced a smooth video.
+Every attempt after that — all done via Eric manually dragging the vehicle
+in Gazebo's interactive GUI instead — came out visibly choppy, several
+seconds between updates. Diagnosing *why* took three wrong turns before
+finding the actual cause, which is worth keeping precisely because each
+wrong guess was reasonable and each was disproven by an actual measurement,
+not just abandoned.
+
+**Wrong guess 1: LiDAR too dense.** The top-down render used matplotlib,
+rebuilding a whole `Figure`/`Axes` and calling `scatter()` fresh every
+frame — expensive, and render time scales with point count. The LiDAR had
+briefly been bumped from 640x16 (10,240 pts/scan) to 1024x64 (65,536
+pts/scan) for a different reason (visual density, see section 5), and
+dropping it back to 640x16 did measurably help throughput (≈130 frames/60s
+at 1024x64 vs ≈364 frames/60s at 640x16 — fewer points, less to render per
+frame) but the video was still choppy. Partial cause, not the cause.
+
+**Wrong guess 2: not enough frames, drive slower.** Reasoned that if
+capture is running at some fixed low rate, moving the vehicle more slowly
+would cover less distance per captured frame and look smoother. It didn't
+change anything, because the actual problem isn't distance-per-frame, it's
+that frames were arriving unevenly over wall-clock time regardless of how
+fast or slow the drag was.
+
+**Wrong guess 3 (partially right): matplotlib itself is just slow.**
+Rewrote the LiDAR renderer from matplotlib to pure NumPy + OpenCV — map
+each point's (x, y) straight to a pixel index, color by height with
+`cv2.applyColorMap` (vectorized over the whole point array, not a
+per-point Python loop), and skip Figure/Axes entirely. This is a real,
+worthwhile change (verified separately, see below) but re-running the
+*manual-drag* capture with it was still choppy. Wrong as the explanation
+for what Eric was actually seeing, right as a general improvement.
+
+**The actual cause.** Eric noticed the *very first* video (headless,
+scripted `drive_loop.py`) had been smooth, and every choppy one since had
+involved manually dragging the model in Gazebo's interactive GUI. That's
+the actual variable that mattered: dragging a model interactively forces
+Gazebo to keep re-rendering the 3D GUI view *at the same time* it's
+rendering the LiDAR and camera sensors, and on this WSL2 setup's
+virtualized/shared GPU, that contention drags the simulation's real-time
+factor down — sim time crawls relative to wall-clock time while
+interacting, so sensor topics update sparsely in wall-clock terms even
+though nothing about my capture script's speed changed. Re-ran the exact
+same OpenCV-based capture headless + scripted (no GUI, no manual
+interaction) and got 790 camera frames / 546 LiDAR frames in 25 seconds
+(≈32/22 Hz) — roughly 10x the manual-drag throughput, and visibly smooth.
+
+**Takeaway kept for later phases:** anywhere data quality/rate matters (this
+recording, but also Phase 3's SLAM data), drive the simulation headless
+with a script, not by hand in the GUI, on this machine. The OpenCV
+rewrite of the LiDAR renderer is also being kept — it's faster and more
+correct regardless (it was also missing an `np.isfinite` check: `skip_nans`
+only drops NaN points, not the +/-inf ones a real "no return" ray can
+produce, which were silently casting to garbage pixel indices before
+being caught by the bounds check — fixed alongside the OpenCV rewrite).
+
+---
+
 ## 2. Installing CUDA hit a wall that had nothing to do with this project
 
 **Context.** Before writing the GPU kernel, the CUDA compiler (`nvcc`)

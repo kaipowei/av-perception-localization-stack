@@ -7,15 +7,15 @@ import os
 import sys
 
 import cv2
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import rclpy
 import sensor_msgs_py.point_cloud2 as pc2
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2
+
+IMG_SIZE = 600
+WORLD_EXTENT = 15.0  # meters, matches the room's half-width
 
 
 class SensorViewCapture(Node):
@@ -42,21 +42,44 @@ class SensorViewCapture(Node):
         self.camera_count += 1
 
     def on_lidar(self, msg):
+        # Matplotlib originally drew this (rebuilding a whole Figure per
+        # frame) and couldn't keep up with the sensor rate -- render time
+        # scaled with point count, so even *fewer* points only partly
+        # helped and slower driving didn't help at all, since the gap is
+        # per-frame processing time, not how fast the vehicle moves.
+        # Pure-numpy/OpenCV pixel assignment has no such per-point Python
+        # overhead: point-to-pixel mapping and coloring are vectorized, and
+        # only the marker/text calls have any fixed (small) per-frame cost.
         points = np.array(
             list(pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True))
         )
-        fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+        img = np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.uint8)
+
         if len(points) > 0:
-            sc = ax.scatter(points["x"], points["y"], c=points["z"], s=2, cmap="viridis", vmin=-0.1, vmax=1.2)
-        ax.set_xlim(-15, 15)
-        ax.set_ylim(-15, 15)
-        ax.set_aspect("equal")
-        ax.set_title(f"LiDAR top-down view (frame {self.lidar_count})")
-        ax.scatter([0], [0], c="red", marker="^", s=80, label="vehicle")
-        ax.legend(loc="upper right")
-        fig.tight_layout()
-        fig.savefig(os.path.join(self.lidar_dir, f"{self.lidar_count:05d}.png"))
-        plt.close(fig)
+            x, y, z = points["x"], points["y"], points["z"]
+            # skip_nans above only drops NaN -- "no return" rays can also
+            # show up as +/-inf, which casts to garbage instead of raising.
+            finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            x, y, z = x[finite], y[finite], z[finite]
+
+        if len(points) > 0 and len(x) > 0:
+            px = ((x + WORLD_EXTENT) / (2 * WORLD_EXTENT) * IMG_SIZE).astype(np.int32)
+            py = ((WORLD_EXTENT - y) / (2 * WORLD_EXTENT) * IMG_SIZE).astype(np.int32)
+            in_bounds = (px >= 0) & (px < IMG_SIZE) & (py >= 0) & (py < IMG_SIZE)
+            px, py, z = px[in_bounds], py[in_bounds], z[in_bounds]
+
+            z_norm = np.clip((z - (-0.1)) / (1.2 - (-0.1)), 0.0, 1.0)
+            z_u8 = (z_norm * 255).astype(np.uint8).reshape(-1, 1)
+            colors = cv2.applyColorMap(z_u8, cv2.COLORMAP_VIRIDIS).reshape(-1, 3)
+            img[py, px] = colors
+            img = cv2.dilate(img, np.ones((2, 2), np.uint8))  # points are 1px, hard to see otherwise
+
+        center = IMG_SIZE // 2
+        cv2.drawMarker(img, (center, center), (0, 0, 255), cv2.MARKER_TRIANGLE_UP, 14, 2)
+        cv2.putText(
+            img, f"LiDAR top-down (frame {self.lidar_count})", (10, 20),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.imwrite(os.path.join(self.lidar_dir, f"{self.lidar_count:05d}.png"), img)
         self.lidar_count += 1
 
     def on_timeout(self):
