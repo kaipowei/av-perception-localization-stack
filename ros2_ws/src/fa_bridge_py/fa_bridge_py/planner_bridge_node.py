@@ -43,7 +43,16 @@ class PlannerBridgeNode(Node):
         self.declare_parameter("goal_x", 6.0)
         self.declare_parameter("goal_y", 6.0)
         self.declare_parameter("goal_heading", math.pi / 4.0)
-        self.declare_parameter("world_half_extent", 8.0)
+        # is_free() rejects anything past this, and hybrid_astar never
+        # special-cases the start pose -- if the vehicle ever ends up past
+        # this boundary, nearly every motion primitive's own path points
+        # near the start are still out of bounds too, so replanning can't
+        # recover. 8.0 was tight enough that a real avoidance maneuver in
+        # the two-obstacle scenario (needing to swing out past (8.8, 4.5))
+        # pushed the vehicle past it and deadlocked there -- see
+        # learning-log entry 16. Widened with real room to spare, short of
+        # the actual walls at +/-15.
+        self.declare_parameter("world_half_extent", 12.0)
         self.declare_parameter("obstacle_margin", 0.6)
         self.declare_parameter("nominal_speed", 3.5)
         # replanning too often (tried 0.5s) never lets nearest_idx advance

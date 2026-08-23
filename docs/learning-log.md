@@ -1068,3 +1068,118 @@ detection" pipeline — the box is static once it exists, and the vehicle
 simply hadn't perceived it before because it didn't exist yet. Good enough
 to prove the reactive-replanning path actually works; not a claim about
 tracking genuinely moving obstacles.
+
+---
+
+## 16. The double-obstacle video didn't actually finish, and neither did my first two fixes
+
+**Context.** Got flagged that the entry 15 video never really reached the
+goal, and that everything in it appeared to drift in the same direction
+over time. Pulled a tiled grid of frames across the whole clip (`ffmpeg
+... tile=5x5`, one glance instead of scrubbing) to see the shape of the
+problem instead of guessing from the video alone: `dist to goal` climbed
+steadily in the back half instead of settling near zero, and the driven
+trail visibly bowed away from where it should've stopped.
+
+**First read on it, wrong.** Guessed this was localization drift on a
+stationary vehicle (a real, known failure mode — point-to-point ICP has
+weak signal on a near-static scene, see entry 11) and went to verify it by
+watching `/fused_odometry` after the vehicle should've stopped. It hadn't
+stopped. `vehicle_driver_node`'s own log showed `dist_to_goal` climbing
+past 5m and the vehicle's x/y running clear past `world_half_extent`. Not
+a post-arrival drift problem — the vehicle never arrived.
+
+**Root cause, actually.** `planner_bridge_node`'s log showed why: two
+minutes of `hybrid-A* found no path from current pose to the goal`, one
+warning every replan cycle, starting right after the steer command spiked
+— 40° → 53° → 58° → 60° → 62°, well past the 35° mechanical limit — while
+Pure Pursuit tried to chase a path the vehicle physically couldn't turn
+tight enough for. Once behind, it fell further behind, which demanded an
+even sharper turn, which fell further behind again — a real divergence,
+not noise. That pushed the vehicle outside `world_half_extent`, and once
+outside it, `hybrid_astar` couldn't recover on its own: it never
+special-cases the start pose, so with the vehicle already out of bounds,
+nearly every motion primitive's own path points near the start are also
+out of bounds, and the search has nothing valid to expand from. A vehicle
+that drifts out of the planning box is stuck out there permanently unless
+something else intervenes.
+
+**Fix attempt 1 — brake to a full stop on an untrustworthy steer command.
+Made a different failure, not a fix.** Added a check: if the commanded
+steer ever exceeds a sane bound (45°, chosen with real headroom above the
+35° mechanical limit), treat it like a stale command and brake, all the
+way to zero. Tested it — no more running off into the distance, but the
+vehicle now parked itself at `v≈0.01` and never moved again.
+`planner_bridge_node`'s log showed why: `pursuit 59.1 deg ... (waypoint
+7/76)`, unchanged for twenty seconds straight. At `v=0` the vehicle isn't
+covering any new ground, so `nearest_idx` never advances past waypoint 7,
+so Pure Pursuit keeps looking at the same unturned stretch of the same
+76-point path and keeps demanding the same 59°, forever. Braking hard
+turned a runaway into a deadlock — arguably worse, since a stuck vehicle
+gives no visual signal anything's even still trying.
+
+**Fix attempt 2 — clip to the mechanical limit and keep creeping. Also
+wrong, differently.** Reasoning: don't throw away the direction Pure
+Pursuit wants, just cap the magnitude, and keep the wheels turning so
+`nearest_idx` has a chance to move. Implemented it — the deadlock was
+gone, but now the vehicle drove in a wide circle, radius = wheelbase /
+tan(max_steer) ≈ 3.86m, and wandered clear across the map (as far as
+`(-8.18, 3.36)` in one run) before finding its way back. Holding near
+max_steer for several consecutive steps just drives a fixed circle that
+has no reason to intersect the path it's meant to be tracking — the
+divergence doesn't resolve, it just becomes a different, more spread-out
+failure.
+
+**Fix attempt 3 — zero the steer (straight line, not a circle), keep a
+minimum creep speed instead of braking to zero.** Combines what each
+earlier attempt got right: going straight doesn't lock the vehicle into a
+circle that can't reconnect with the path, and a nonzero creep speed
+(1.0 m/s) means `nearest_idx` keeps advancing instead of freezing.
+Also widened `world_half_extent` from 8.0 to 12.0, since the two-obstacle
+scenario's real avoidance maneuvers needed room past what the
+single-obstacle demo ever required, and getting pushed against that
+boundary was the original trigger for all of this. This combination never
+deadlocked and never ran off into a wide circle in any test run — real
+progress — but it still sometimes took a long, loose loop before
+straightening out and finding the goal, which is safe but not what a demo
+clip should look like.
+
+**Tried lowering `nominal_speed` (3.5 → 2.5) next, on the theory that a
+slower vehicle gives the tracker more reaction time. Made things worse, if
+anything** — one run at the lower speed nearly ran the vehicle into the
+newly-widened boundary anyway. Speed wasn't the variable that mattered.
+
+**The actual fix.** Looked again at what the wide loops had in common:
+they all happened after the vehicle rounded the second obstacle at
+`(5.5, 3.3)` — only about 2.8m from the `(6, 6)` goal. That's very little
+room to simultaneously finish dodging a box *and* line up precisely on a
+1.0m-tolerance goal — not much margin for the tracker to work with even
+when nothing else is going wrong. Moved the second obstacle to
+`(4.3, 2.3)`, keeping it squarely in the route out of the first dodge but
+giving real separation from the goal. Reran: clean run, `reached goal:
+(6.91, 6.24), 0.95m from target`, no loop, no stall, done in under 15
+seconds. Ran it again to check it wasn't luck — same result.
+
+**Result.** Re-recorded `autonomous_drive_phase4_double_obstacle.mp4` with
+the fixed obstacle placement and the steer-divergence guard in place.
+Checked it the same way as every other video in this project: pulled
+frames spanning the whole run and looked at them directly rather than
+trusting the log alone — the vehicle rounds `obstacle_1`, the second
+obstacle appears mid-route and gets a visible, single, direct correction
+around it, and the trail curves smoothly into the goal with no loop or
+drift anywhere in the sequence.
+
+Worth naming what actually happened across this entry, since it's the
+useful part for next time: the first symptom (didn't reach goal) had
+*three* different bugs sitting behind it, and the first two "fixes"
+were both real, defensible engineering ideas — brake on bad input, cap
+output the physical limit — that each introduced a new failure mode
+instead of removing the old one. Neither was wasted, exactly: attempt 1
+proved braking-to-stop breaks `nearest_idx` progression, attempt 2 proved
+clipping-and-holding breaks path convergence, and both of those findings
+directly shaped attempt 3's actual design (move, don't stop; go straight,
+don't circle). But none of the three control-side fixes addressed the
+actual root cause, which wasn't in the controller at all — it was 2.8m of
+geometry between an obstacle and a goal. Worth remembering next time a fix
+"works" but still feels fragile: check the scenario's geometry before
+trusting another round of controller tuning.

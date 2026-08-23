@@ -73,8 +73,14 @@ class SpawnTrigger(Node):
 
 def main():
     world = sys.argv[1] if len(sys.argv) > 1 else "test_track"
-    obs_x = float(sys.argv[2]) if len(sys.argv) > 2 else 5.5
-    obs_y = float(sys.argv[3]) if len(sys.argv) > 3 else 3.3
+    # (5.5, 3.3) -- only ~2.8m from the (6, 6) goal -- left the vehicle too
+    # little room to both dodge it and line up on the goal at the same
+    # time, and was the real cause of the wide, sometimes-unstable loops
+    # documented in learning-log entry 16. (4.3, 2.3) gives real separation
+    # from the goal while still sitting squarely in the route out of
+    # obstacle_1's dodge.
+    obs_x = float(sys.argv[2]) if len(sys.argv) > 2 else 4.3
+    obs_y = float(sys.argv[3]) if len(sys.argv) > 3 else 2.3
     delay_sec = float(sys.argv[4]) if len(sys.argv) > 4 else 6.0
 
     rclpy.init()

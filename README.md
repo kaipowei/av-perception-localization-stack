@@ -136,6 +136,23 @@ Three ROS2 packages, split by concern:
   actual frame transform through the vehicle's fused pose. Entry 15 has the
   full story, including the fixed-vs-triggered-by-position timing tradeoff
   that led to finding it.
+- **Phase 4 extension, round 2 — the first double-obstacle video didn't
+  actually finish.** Got called out for it: `dist_to_goal` climbed instead
+  of settling, and the vehicle had run outside `world_half_extent` while
+  Pure Pursuit demanded steering angles past the mechanical limit chasing a
+  path it couldn't physically keep up with. Two straightforward-sounding
+  fixes (brake hard on an untrustworthy steer command; clip the angle and
+  keep going) each traded the bug for a different one — braking to a full
+  stop froze `nearest_idx` in place and deadlocked forever, clipping and
+  holding near max steering just drove the vehicle in a fixed circle that
+  never reconnected with its path. The combination that actually held up
+  (zero the steer instead of clipping it, keep a minimum creep speed
+  instead of braking to zero) fixed the symptom but not the cause: the
+  actual root cause was 2.8m of clearance between the second obstacle and
+  the goal, not enough room to both finish a dodge and line up on a
+  1.0m-tolerance target. Moved the obstacle, re-recorded, confirmed clean
+  on two separate runs. Entry 16 has the full sequence, including why the
+  first two "fixes" felt reasonable and weren't.
 
 Natural next step, not attempted here: bridge to Gazebo's own dynamic
 vehicle plugins, or CARLA, to see how the same planner/controller stack
