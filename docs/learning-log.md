@@ -719,3 +719,248 @@ offset, down from 33° but not zero. Diminishing returns past this point
 the initial-heading transient) — decided it wasn't worth chasing since the
 position result already shows the fusion is doing real work, reported
 honestly instead of tuned until the number looked clean.
+
+---
+
+## 13. Wiring this repo into friction-aware-planner — the actual point of building both, and four real problems on the way
+
+**Context.** Everything up to here builds toward one thing: this repo makes
+a pose and an obstacle list, friction-aware-planner's Hybrid-A* and MPC know
+what to do with a pose and an obstacle list, so hook them together instead
+of leaving that as a someday note in the README. New package,
+`fa_bridge_py`, one node, `planner_bridge_node.py`: subscribes to
+`fused_odometry` and `obstacle_markers`, calls `hybrid_astar()` for a path
+around whatever the LiDAR pipeline currently sees, runs `MPCController.steer()`
+against that path, publishes both. There's still no drivetrain on the
+Gazebo vehicle, so nothing here can actually drive — the point was proving
+the interface works, not adding actuation.
+
+**Bug 1 — cvxpy pulls in numpy>=2, and the whole rest of this repo needs
+numpy<2.** `pip install`ing friction-aware-planner upgraded numpy to 2.5.2
+system-wide, silently — cvxpy and its scipy dependency both require it. That
+directly breaks `cv_bridge` (entry 7's whole numpy<2 fight, for the YOLO
+node). Two nodes in the same repo now wanted incompatible numpy majors, and
+since every ROS2 Python node is its own process anyway, they don't actually
+need to share one. Fix: a separate venv for just this node
+(`python3 -m venv --system-site-packages`, so `rclpy` still resolves from
+the system ROS2 install), numpy2/scipy/cvxpy/faplanner installed inside it,
+system site-packages left alone at numpy<2 for everything else.
+
+**Bug 2 — building from inside the venv didn't actually make `ros2 run` use
+it.** Reasonable-sounding plan: run colcon from inside the activated venv,
+so the console-script wrapper it generates points at the venv's Python.
+Built fine, ran, `ros2 run fa_bridge_py planner_bridge_node` crashed on a
+numpy ABI error immediately — checked the installed script's shebang line
+and it said `/usr/bin/python3`, the system interpreter, not the venv's.
+colcon's `ament_python` build step doesn't pick up the currently-active
+venv for the shebang it writes. Worked around it by not using `ros2 run` at
+all for this one node — source the workspace's `setup.bash` for the
+`PYTHONPATH`, then call the venv's Python directly:
+`~/ros2_build/venvs/fa_bridge/bin/python3 -m fa_bridge_py.planner_bridge_node`.
+
+**A red herring, then the real bug — a path that looped down to (5, -7.6)
+before heading anywhere near the goal.** First live test: node ran clean,
+published a path, but the path itself was nonsense — from (0, 0) it should
+head roughly straight for the goal at (6, 6), bending a little around the
+box obstacle at (3, 2). Instead it swung almost 8 meters south first, then
+looped back up through negative x, then finally curved up to the goal.
+Wrong enough that "the planner is buggy" was the obvious first guess.
+
+Dumped the live obstacle markers to check what the planner was actually
+being told to avoid, and found more than the one real box: several thin
+sliver clusters scattered around the track, near-zero extent in one axis,
+most likely ground-plane-fit edge noise (this LiDAR only has 16 vertical
+beams, so ground returns land in rings at fixed ranges set by the beam
+angles, and RANSAC's one global plane doesn't cleanly absorb all of them).
+`obstacle_detector_node`'s own filter only catches the other end — clusters
+*bigger* than `max_obstacle_extent_` (walls) — nothing was rejecting these
+degenerate slivers. Added a minimum-extent filter in the bridge node before
+handing markers to the planner (real obstacles are chunky in both x and y;
+these aren't). Cut the obstacle count from 21 to 6. Reran the same test —
+identical looping path, not one waypoint different. Not the bug.
+
+Isolated `hybrid_astar()` completely, outside ROS2, fed it the exact same 6
+obstacles by hand: perfectly sane 21-point path straight toward the goal.
+So the planner and the obstacle list were both fine — meant the start pose
+being handed to it was wrong. Checked `/fused_odometry` directly and it was
+sitting at (0.63, 0.91), matching the first point of the bad path exactly,
+even though I'd just teleported the Gazebo vehicle to (0, 0) with
+`gz service set_pose` specifically to get a clean starting point for this
+test.
+
+**Bug 3 (the real one) — teleporting the vehicle doesn't reset the
+localization stack, because it has nothing to reset against.** ICP and the
+EKF only ever track *relative* motion between consecutive LiDAR frames —
+no map, no GPS, no absolute reference of any kind (this is the whole "not
+SLAM yet" point from entries 10-12). `gz service set_pose` moves the
+simulated vehicle, but the ICP/EKF nodes never see that as an event —
+they just keep comparing scans, and a scan taken right after a teleport
+looks like zero motion relative to the scan before it, so the filters stay
+locked onto wherever they were before the teleport, forever, with no way to
+notice the ground truth jumped. Not a bug in the filters — a correct
+consequence of having no absolute reference, which is exactly the tradeoff
+entry 10 signed up for. Fix was in my test process, not the code: after
+manually teleporting the vehicle for a clean test, restart
+`scan_matcher_node` and `ekf_fusion_node` too, so their internal state
+actually starts back at zero along with the simulator.
+
+**Result.** With the localization nodes restarted, `/fused_odometry` read
+(0.000001, 0.000003) — real zero — and the replanned path came back sane:
+21 points from (0, 0) curving up to (5.45, 5.17), bending visibly around
+the obstacle at (3, 2) on the way (at x=3.18 the path sits at y=1.40, well
+under the y=x line a straight shot would need — that's the detour). MPC's
+steering output sat at a flat ~0.0006 rad the whole time, which is correct,
+not broken: the vehicle isn't actually moving (still no drivetrain), so the
+path's first point is always exactly the vehicle's current position and
+cross-track error never has a chance to build up. Confirmed MPC itself
+reacts properly by checking back against an earlier full-speed loop
+(driven before this obstacle-list debugging started) where the same
+`planned_steer_cmd` topic showed real swings — -5.3°, 2.5°, -0.7° — as the
+vehicle actually covered ground and the nearest-path-point kept moving.
+Both halves of the bridge do what they're supposed to; the whole chain from
+perception through localization through planning through control is now
+wired together and produces numbers I can point at, even with the
+actuation half still missing.
+
+---
+
+## 14. Phase 4 — actually driving, five real problems before the closed loop worked, and why MPC ended up split from Pure Pursuit
+
+**Context.** Entry 13 closed the loop on paper: a real path, a real steer
+command, nothing actually moving. That's an honest demo of the interface,
+but not a convincing one — a static path bending around a box proves less
+than watching a vehicle actually get there on its own. The Gazebo vehicle
+still has no wheel joints, no suspension, no tire model, and building a real
+physics drivetrain is its own large, mostly-unrelated chunk of Gazebo/SDF
+work. Instead of pretending that gap doesn't exist, `vehicle_driver_node`
+integrates the exact kinematic bicycle model friction-aware-planner's own
+planner already reasons in (same wheelbase, same steering convention) and
+syncs the result into Gazebo with the same `set_pose` service
+`sim/drive_loop.py` already used for teleporting. The vehicle's motion is
+real and closed-loop — driven entirely by this repo's own perception,
+localization, and planning — the actuation underneath it is a kinematic
+integrator standing in for a real drivetrain, not a simulation of one, and
+that's stated plainly rather than glossed over.
+
+**Bug 1 — a stale steer command runs forever if nothing says otherwise.**
+First live run: the vehicle accelerated, picked up a small steer command,
+then blew straight past the goal at full speed and kept going, x=12 and
+climbing. Cause: `planner_bridge_node`'s `control_step()` goes silent (no
+publish at all) once the vehicle's `nearest_idx` runs past the end of the
+current path — which meant `vehicle_driver_node` just kept applying
+whatever steer value it received last, forever, since it had no way to know
+that value was stale. Fixed on both ends: `planner_bridge_node` now
+publishes a neutral 0.0 steer instead of going silent when a path runs out,
+and `vehicle_driver_node` added its own timeout — no fresh steer message
+within `steer_timeout_sec` and it zeroes the command itself rather than
+trusting a topic that's gone quiet. Belt and suspenders, and the suspenders
+turned out to matter later in this same entry.
+
+**A wrong guess, ruled out cleanly.** Rerunning after bug 1's fix, the
+vehicle still drove almost dead straight past the goal and off into
+negative y — looked exactly like the steer sign might be inverted (same
+category of bug as entry 11's ICP sign flip). Instead of staring at the
+full pipeline, isolated it: built a synthetic path curving toward +y,
+placed a vehicle state below it, called `MPCController.steer()` directly,
+and integrated the result through `KinematicBicycleModel.step()` for five
+steps by hand. The vehicle's y increased and heading turned toward the
+path, exactly as it should. MPC's sign convention was correct. Not the bug
+— saved a lot of time not chasing it further.
+
+**Bug 2 (the actual first cause) — replanning mid-route with a strict
+arrival heading finds bizarre detours.** Dumped `hybrid_astar()` in
+isolation again, this time with a start pose partway along a real route
+(3, 0, 0°) instead of the origin, same goal (6, 6, 45°): the "optimal"
+path swung out to y=-7.7 before curving back — an actual repeat of the
+looping-path symptom from entry 13, but this time not caused by a stale
+EKF reading. `goal_heading_tol` defaults to 25°, and with the motion
+primitive set this discretized search uses (5 steer angles, 2m arc length),
+hitting both a specific position *and* a specific final heading within a
+short distance is a tight constraint — tight enough that the search's
+best-g pruning (bucketed by discretized x/y/heading cells) sometimes
+finds a long way around before a short direct route that happens to land
+in an already-claimed cell. Since this node replans from scratch every
+couple hundred ms while the vehicle is moving, forcing *every one* of
+those intermediate replans to also nail a specific arrival heading was
+pointless — only the very last stop should care about that. Widened
+`goal_heading_tol` to `math.pi` (i.e., don't check it) for every replan
+call. Isolated retest of the same (3, 0, 0°) → (6, 6, 45°) case: 21 points,
+smooth, direct. Fixed at the isolation level — but the full loop still
+didn't drive right.
+
+**Bug 3 (the real remaining cause) — resetting `nearest_idx` to 0 on every
+replan means the controller only ever sees the un-turned start of a path.**
+With bug 2 fixed, the vehicle *still* drove almost straight for the first
+several seconds, steer pinned near 0°, before snapping to a hard turn too
+late to actually make the corner. `replan_period_sec` was 0.5s at the time
+(lowered earlier, in entry 13, to keep planning fresh as the vehicle
+moved) — and `control_step()` always searched for `nearest_idx` starting
+from 0. Every fresh path starts exactly at the vehicle's current position,
+so `nearest_idx` kept landing on point 0 or 1 of a path that was replaced
+before the vehicle had covered enough ground to reach the part that's
+actually curved (`hybrid_astar`'s motion primitives need real arc length to
+accumulate heading change — the first primitive or two of almost any path
+here still points close to straight ahead). Both controllers compute their
+reference direction from a small window right around `nearest_idx`, so
+with `idx` stuck near 0 they only ever saw "keep going straight."
+Two-part fix: `nearest_idx` now carries forward across `control_step()`
+calls instead of resetting to 0 every time (only `replan()` itself resets
+it, since a new path really does need a fresh start), and
+`replan_period_sec` went back up to 2.0s — slow enough that `nearest_idx`
+has room to actually advance into the curved part of a path before that
+path gets replaced, fast enough that the vehicle doesn't run outside the
+planning bounds first (3.0s, tried earlier, was too slow for that).
+
+**Bug 4 (a real finding, not a bug in the usual sense) — MPC's
+friction-circle bound is right, and wrong for this actuator.** Even after
+bug 3's fix, steer commands kept saturating at a suspiciously exact 5.3°
+and staying there — turning radius math says that's roughly a 29m radius,
+useless for dodging a 1m box a few meters away. Traced it to
+`MPCController._friction_steer_bounds()`: `alpha_bound = mu * fz_front /
+caf`, which for this vehicle's mass/mu/cornering-stiffness works out to
+almost exactly 5.27° regardless of speed (the bound doesn't depend on `vx`
+once `vy` and `r` are both 0, which they always are here — the bridge
+never estimates sideslip or yaw rate). That's MPC doing exactly its job:
+capping steering to what a *slipping, dynamic* vehicle's tires could
+actually deliver at this road `mu`. The problem is architectural, not
+numerical — `vehicle_driver_node` actuates through a pure *kinematic*
+model with zero slip, so a friction bound computed for a car that can slip
+just throws away real, physically-fine kinematic turning capability the
+vehicle actually has. Fix: split the two controllers by job.
+`PurePursuit` (already in friction-aware-planner, same `steer(state,
+path_x, path_y, nearest_idx)` interface via `closed_loop.py`'s shared
+convention, no friction bound, built for exactly this kinematic-tracking
+case) now computes the command that actually drives the vehicle, published
+on `planned_steer_cmd`. MPC still runs every step and still publishes its
+own advisory number on `mpc_advisory_steer_cmd` — not dead code, a
+legitimate demonstration that the friction-aware constraint is doing real
+work (its output does sit near 0° through the tight parts of this route,
+correctly refusing a turn no real tire could hold), just not the number
+driving the wheels.
+
+**Result.** Full run, `(0, 0)` to `(6, 6)`, obstacles at `(3, 2)` and
+`(-4, -3)`: the vehicle accelerated, replanned continuously as it moved,
+visibly curved around the near obstacle, and stopped at `(5.70, 5.17)` —
+0.88m from the goal, inside the 1.0m tolerance — about 13.5 seconds after
+starting, with no planning failures or manual intervention anywhere in the
+run. Recorded a top-down video of the whole thing
+(`sim/capture_autonomous_drive.py`, same PNG-frames-then-ffmpeg approach as
+Phase 2's sensor captures, driven by a fixed 10Hz render timer rather than
+the `fused_odometry` callback directly since that topic actually publishes
+near IMU rate — thousands of frames would've been rendered and written for
+nothing). Checked the actual output before calling this done: pulled five
+frames spanning the run and looked at them directly rather than trusting
+the numbers alone — start position, the trail curving under the obstacle
+box, the curve straightening out toward the goal, and the vehicle stopped
+right at the goal marker. All five look exactly like what the log numbers
+say happened.
+
+One thing to be precise about, since it's easy to overstate: this is a
+kinematic software-in-the-loop integration, not a physically simulated
+vehicle. The actuation layer has zero tire slip by construction, so it
+proves the perception → localization → planning → control software chain
+works end to end, not that the *specific steering commands* would survive
+contact with a real (or even a physics-simulated) vehicle's dynamics.
+Bridging to Gazebo's own dynamic vehicle plugins, or CARLA, to check how
+the same planner/controller stack holds up once real tire slip and
+suspension are in the loop, is a natural next step this doesn't attempt.

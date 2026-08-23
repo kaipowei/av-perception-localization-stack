@@ -12,9 +12,9 @@ scoped perception and SLAM *out* to keep its own story tight — its
 (localization is assumed known)." This project is the piece that
 assumption skipped over: the sensing and localization layer a full
 autonomy stack actually needs alongside planning and control. No code
-dependency between the two repos — the plan is to pull
-`friction-aware-planner` in as a pip dependency once this project's pose
-output is ready to feed its planner, not fork or copy its code.
+dependency between the two repos — `friction-aware-planner` is pulled in
+as a pip dependency (its Hybrid-A* planner and MPC controller, unmodified),
+not forked or copied.
 
 Built to close a specific resume gap: production C++ and CUDA experience,
 and SLAM/localization/mapping, all things robotics-software and
@@ -55,9 +55,19 @@ flowchart LR
     bridge -- /imu --> ekf
     icp -- /icp_odometry --> ekf
 
+    bridge["planner_bridge_node<br/>Hybrid-A* (planning) + Pure Pursuit (drives) + MPC (friction advisory)"]
+    det -- /obstacle_markers --> bridge
+    ekf -- /fused_odometry --> bridge
+
+    driver["vehicle_driver_node<br/>kinematic actuation"]
+    bridge -- /planned_steer_cmd --> driver
+    driver -. gz set_pose .-> sim
+
     det -- /obstacle_markers --> out1[(obstacle boxes)]
     yolo -- /detections_2d --> out2[(2D detections)]
     ekf -- /fused_odometry --> out3[(vehicle pose)]
+    bridge -- /planned_path --> out4[(planned path)]
+    bridge -- /mpc_advisory_steer_cmd --> out5[(friction-limited advisory)]
 ```
 
 Three ROS2 packages, split by concern:
@@ -67,6 +77,7 @@ Three ROS2 packages, split by concern:
 | `fa_perception_cpp` | C++17 / CUDA | point-cloud downsampling, ground segmentation, clustering |
 | `fa_perception_py` | Python | camera 2D detection (YOLO) |
 | `fa_localization_cpp` | C++17 | ICP scan-matching odometry, IMU/ICP EKF fusion |
+| `fa_bridge_py` | Python | plans with Hybrid-A*, drives with Pure Pursuit, runs MPC as a friction-aware advisory, actuates via a kinematic model |
 
 ## Status
 
@@ -76,15 +87,44 @@ Three ROS2 packages, split by concern:
 - **Phase 2 — done.** Gazebo test world with simulated LiDAR + camera,
   ground segmentation + clustering, a YOLO camera detector, and a recorded
   rosbag dataset (116.5s / 3677 messages).
-- **Phase 3 — in progress.** ICP scan-matching localization, checked
+- **Phase 3 — done.** ICP scan-matching localization, checked
   against Gazebo ground truth at ~0.53m error over a ~42m loop (~1.3%).
   IMU + EKF fusion brings that to ~0.44m (~1.04%) — the fused estimate
   measurably beats ICP alone, which is the actual point of doing fusion at
   all. Took five real bugs to get there, each one found by testing a
   single known motion instead of debugging the full loop directly — see
   [docs/learning-log.md](docs/learning-log.md) entries 10-12 for the whole
-  story. Closing the loop into `friction-aware-planner`'s planner is still
-  ahead.
+  story. `fa_bridge_py`'s `planner_bridge_node` closes the loop into
+  `friction-aware-planner`: it feeds this repo's fused pose and obstacle
+  list straight into that repo's Hybrid-A* and MPC, and both planning and
+  control come back with real numbers — a path that visibly bends around a
+  real obstacle, and steer commands that respond as the vehicle moves. See
+  entry 13 for four real bugs found wiring the two repos together (a numpy
+  version conflict between the two repos' dependencies, colcon not
+  honoring an active venv, a perception-noise dead end, and ICP/EKF losing
+  sync after a manual pose reset).
+- **Phase 4 — done.** The vehicle actually drives itself now: starting at
+  `(0, 0)`, it plans, moves, replans as it goes, curves around a real
+  obstacle, and stops at `(5.70, 5.17)` — 0.88m from a `(6, 6)` goal, inside
+  tolerance — in about 13.5 seconds, no manual intervention. There's still
+  no physics drivetrain (no wheel joints, no tire model), so actuation is a
+  kinematic bicycle integrator synced into Gazebo via the same `set_pose`
+  service `drive_loop.py` already used — this is a **kinematic
+  software-in-the-loop integration**, proving the perception → localization
+  → planning → control chain end to end, not a physically simulated
+  vehicle. Getting the closed loop to actually work took five more real
+  bugs, including a genuinely interesting one: MPC's friction-circle
+  steering bound (correct for a real, slip-capable tire) was starving the
+  kinematic (zero-slip) actuator of turning capability it actually had, so
+  driving now uses `friction-aware-planner`'s `PurePursuit` controller
+  instead, with MPC kept running purely as a friction-aware advisory
+  signal — see entry 14 for the full sequence, including a wrong guess
+  (suspected sign flip, ruled out with an isolated test) that got caught
+  before it wasted more time. Demo video: `sim/videos/autonomous_drive_phase4.mp4`.
+
+Natural next step, not attempted here: bridge to Gazebo's own dynamic
+vehicle plugins, or CARLA, to see how the same planner/controller stack
+holds up once real tire slip and suspension are actually in the loop.
 
 Two real-sensor-data problems that Phase 1's clean synthetic point cloud
 never could have surfaced — NaN "no-return" LiDAR points, and the vehicle
@@ -102,6 +142,13 @@ every current CUDA release's bundled headers).
 - colcon
 - Python: `ultralytics`, `opencv-python`, `numpy<2` (pinned on purpose —
   see the learning log for the `cv_bridge` ABI fight this avoids)
+- `ffmpeg` (turns the PNG frames `sim/capture_*.py` writes into the demo videos)
+- `fa_bridge_py` needs its own venv, separate from the rest of the stack
+  (`python3 -m venv --system-site-packages`) with `friction-aware-planner`
+  installed in it — its `cvxpy`/`scipy` dependencies need numpy>=2, which
+  conflicts with the numpy<2 pin above; see entry 13. `friction-aware-planner`
+  is currently a private repo, so `pip install git+https://github.com/kaipowei/friction-aware-planner`
+  only works with access to it — installing from a local clone works too.
 - Built and run inside WSL2 Ubuntu 24.04 on Windows
 
 ## Quick start
@@ -128,10 +175,25 @@ ros2 run fa_perception_py yolo_detector_node --ros-args -r camera:=/camera
 ros2 run fa_localization_cpp scan_matcher_node
 ros2 run fa_localization_cpp ekf_fusion_node
 
-# terminal 4 — drive the vehicle around (no drivetrain yet, so this just
-# sweeps a fixed loop through Gazebo's set_pose service) and watch it work
-python3 ../sim/drive_loop.py test_track 0.3
+# terminal 4 — planner_bridge_node needs its own venv (see Requirements),
+# and colcon's ament_python build doesn't shebang ros2 run to it, so call
+# the venv's python directly instead of `ros2 run`
+source install/setup.bash
+~/path/to/venv/bin/python3 -m fa_bridge_py.planner_bridge_node
+
+# terminal 5 — the vehicle drives itself toward (6, 6), curving around
+# whatever obstacles it sees, using planner_bridge_node's steer output
+ros2 run fa_bridge_py vehicle_driver_node
 ros2 topic echo /fused_odometry
+
+# optional: sim/drive_loop.py still exists for manually sweeping a fixed
+# loop (e.g. to record perception-only footage without the planner running)
+# python3 ../sim/drive_loop.py test_track 0.3
+
+# optional: record a top-down video of the drive, then encode it
+python3 ../sim/capture_autonomous_drive.py /tmp/drive_capture 6.0 6.0 25.0
+ffmpeg -framerate 10 -i /tmp/drive_capture/frames/%05d.png \
+  -c:v libx264 -pix_fmt yuv420p ../sim/videos/autonomous_drive_phase4.mp4
 ```
 
 ## Repository layout
@@ -140,11 +202,14 @@ ros2 topic echo /fused_odometry
 ros2_ws/src/
 ├── fa_perception_cpp/    # CUDA downsample, ground segmentation, clustering
 ├── fa_perception_py/     # YOLO camera detector
-└── fa_localization_cpp/  # ICP odometry, EKF fusion
+├── fa_localization_cpp/  # ICP odometry, EKF fusion
+└── fa_bridge_py/         # feeds fused pose + obstacles into friction-aware-planner
 sim/
-├── worlds/test_track.sdf # Gazebo world: walls, obstacles, vehicle + sensors
-├── drive_loop.py         # scripted waypoint sweep (no drivetrain yet)
-└── videos/                # camera/LiDAR sensor-view demo clips
+├── worlds/test_track.sdf       # Gazebo world: walls, obstacles, vehicle + sensors
+├── drive_loop.py               # manual scripted waypoint sweep (perception-only footage)
+├── capture_sensor_views.py     # camera/LiDAR frame capture (Phase 2)
+├── capture_autonomous_drive.py # top-down autonomous-drive frame capture (Phase 4)
+└── videos/                     # camera/LiDAR/autonomous-drive demo clips
 docs/
 └── learning-log.md       # the full build story, Context/Action/Result per step
 ```
