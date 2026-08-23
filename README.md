@@ -28,10 +28,18 @@ Phase 1 complete: a C++17 ROS2 package with a native-CMake CUDA voxel-grid
 downsampler, correctness-checked against a CPU reference implementation and
 benchmarked (GPU wins above ~100k points; loses below that to launch/
 transfer overhead), wired into a live source → processor node pipeline.
-See [docs/learning-log.md](docs/learning-log.md) for the full story,
-including why the dev environment ended up as Ubuntu 24.04 + ROS2 Jazzy +
-CUDA 12.6 specifically. Phase 2 (Gazebo-simulated LiDAR, ground
-segmentation, clustering) is next.
+
+Phase 2 complete: a Gazebo (Harmonic) test world with a simulated LiDAR +
+camera, ground segmentation + Euclidean clustering (PCL) on the
+GPU-downsampled cloud, a YOLO-based camera detector (`fa_perception_py`),
+and a recorded rosbag dataset (116.5s / 3677 messages across LiDAR,
+downsampled points, obstacle markers, and 2D detections). See
+[docs/learning-log.md](docs/learning-log.md) for the full story, including
+why the dev environment ended up as Ubuntu 24.04 + ROS2 Jazzy + CUDA 12.6,
+and two real-sensor-data problems (NaN "no-return" LiDAR points, the
+vehicle detecting its own chassis) that never showed up with Phase 1's
+synthetic data. Phase 3 (ICP-based localization/SLAM, fused with the
+friction-aware planner's EKF) is next.
 
 ## Requirements
 

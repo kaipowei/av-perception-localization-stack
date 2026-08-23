@@ -304,6 +304,68 @@ prediction was correct rather than just a guess.
 
 ---
 
+## 5. Recording a dataset — and why it ended up done by hand
+
+**Context.** The last Phase 2 item: drive the vehicle around the track
+while recording every perception topic to a `rosbag`, so there's an actual
+dataset (not just live demos) for later phases to reuse. The vehicle has no
+drivetrain yet, so "driving" meant sweeping its pose through waypoints via
+Gazebo's `/world/<name>/set_pose` service.
+
+**What went wrong first, twice.**
+
+1. First attempt scripted the waypoint sweep by shelling out to the `gz
+   service` CLI once per waypoint (`sim/drive_loop.py`, originally
+   `STEP=0.5`m -> ~106 calls). Each call pays the full cost of spawning a
+   process and opening a fresh Ignition Transport connection, which turned
+   out to dominate over the intended 0.15s pause between waypoints — a
+   16-second drive stretched into minutes. Recording ran the whole time,
+   and recording the *raw, uncompressed* camera topic (640x480 x ~15Hz)
+   added ~14MB/s on its own, so the bag hit 641MB before anything useful
+   was learned from it. Fixed the waypoint density (`STEP=2.0`, ~27 calls)
+   and dropped raw `/camera` from the topic list — `/camera_info` alone
+   is enough to prove the camera pipeline is live without the size cost;
+   a real fix would bridge through `compressed_image_transport` instead,
+   noted here rather than built, since a proper fix wasn't needed for what
+   this recording is actually for (LiDAR + detections, not raw video).
+2. Tried switching to Gazebo's windowed GUI (`gz sim -r`, no
+   `--headless-rendering`) so the process could be watched live instead of
+   reasoned about from logs. WSLg (confirmed working via `DISPLAY=:0`,
+   `WAYLAND_DISPLAY=wayland-0`) is set up on this machine, but a GUI
+   launched through Claude's own tool-invoked `wsl -d ... -e bash -lc`
+   command runs successfully with zero errors and simply never produces a
+   visible window — apparently a different session context than an
+   interactively-opened WSL terminal, which WSLg's Wayland/X11 forwarding
+   doesn't reach. Confirmed by having Eric run the identical `gz sim -r`
+   command in his own terminal, where the window appeared immediately.
+
+**What actually worked: doing it by hand.** Rather than keep debugging
+scripted teleop and cross-session GUI forwarding for a one-time dataset
+recording, Eric ran the pipeline himself across four terminals — Gazebo
+GUI in one, `ros_gz_bridge` in another, the three perception nodes in a
+third, `ros2 bag record` in a fourth — and dragged the vehicle around the
+track by hand using Gazebo's translate gizmo while it recorded. Simpler
+than getting the automation right, and the dataset it produced doesn't
+care how the vehicle moved.
+
+**Result:**
+
+```
+Duration: 116.5s | Messages: 3677
+/lidar/points        607  (raw LiDAR)
+/points_downsampled  616  (after Phase 1's GPU voxel downsample)
+/obstacle_markers    605  (ground segmentation + clustering)
+/detections_2d       929  (YOLO)
+/camera_info         920
+```
+
+A clean shutdown (`Ctrl+C`, not killing the terminal) was necessary for
+`ros2 bag` to write its metadata file — an earlier attempt where the
+recorder process was still alive when checked produced "Could not find
+metadata in bag directory" until it was actually stopped properly.
+
+---
+
 ## 2. Installing CUDA hit a wall that had nothing to do with this project
 
 **Context.** Before writing the GPU kernel, the CUDA compiler (`nvcc`)
