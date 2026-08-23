@@ -121,38 +121,6 @@ Three ROS2 packages, split by concern:
   signal — see entry 14 for the full sequence, including a wrong guess
   (suspected sign flip, ruled out with an isolated test) that got caught
   before it wasted more time. Demo video: `sim/videos/autonomous_drive_phase4.mp4`.
-- **Phase 4 extension — reacting to a second, live-spawned obstacle.**
-  `sim/spawn_second_obstacle.py` drops a new obstacle directly into the
-  vehicle's path partway through a drive (Gazebo's `EntityFactory` service,
-  not present at start), and `planner_bridge_node` now replans immediately
-  on an event instead of waiting for its normal timer — see
-  `sim/videos/autonomous_drive_phase4_double_obstacle.mp4`. Chasing the
-  timing on this surfaced a real, previously-unnoticed bug: `obstacle_markers`
-  has always been published in the LiDAR's own frame, not world
-  coordinates, and `planner_bridge_node` had been using it as world
-  coordinates directly since entry 13 — it only ever looked right because
-  the first obstacle sits close to the origin, where the vehicle hasn't
-  turned enough yet for the two frames to visibly disagree. Fixed with an
-  actual frame transform through the vehicle's fused pose. Entry 15 has the
-  full story, including the fixed-vs-triggered-by-position timing tradeoff
-  that led to finding it.
-- **Phase 4 extension, round 2 — the first double-obstacle video didn't
-  actually finish.** Got called out for it: `dist_to_goal` climbed instead
-  of settling, and the vehicle had run outside `world_half_extent` while
-  Pure Pursuit demanded steering angles past the mechanical limit chasing a
-  path it couldn't physically keep up with. Two straightforward-sounding
-  fixes (brake hard on an untrustworthy steer command; clip the angle and
-  keep going) each traded the bug for a different one — braking to a full
-  stop froze `nearest_idx` in place and deadlocked forever, clipping and
-  holding near max steering just drove the vehicle in a fixed circle that
-  never reconnected with its path. The combination that actually held up
-  (zero the steer instead of clipping it, keep a minimum creep speed
-  instead of braking to zero) fixed the symptom but not the cause: the
-  actual root cause was 2.8m of clearance between the second obstacle and
-  the goal, not enough room to both finish a dodge and line up on a
-  1.0m-tolerance target. Moved the obstacle, re-recorded, confirmed clean
-  on two separate runs. Entry 16 has the full sequence, including why the
-  first two "fixes" felt reasonable and weren't.
 
 Natural next step, not attempted here: bridge to Gazebo's own dynamic
 vehicle plugins, or CARLA, to see how the same planner/controller stack
@@ -222,10 +190,6 @@ ros2 topic echo /fused_odometry
 # loop (e.g. to record perception-only footage without the planner running)
 # python3 ../sim/drive_loop.py test_track 0.3
 
-# optional: spawn a second obstacle live, ~6s into the drive, and force an
-# immediate replan against it instead of waiting for the next timer tick
-python3 ../sim/spawn_second_obstacle.py test_track 5.5 3.3 6.0
-
 # optional: record a top-down video of the drive, then encode it
 python3 ../sim/capture_autonomous_drive.py /tmp/drive_capture 6.0 6.0 25.0
 ffmpeg -framerate 10 -i /tmp/drive_capture/frames/%05d.png \
@@ -245,7 +209,6 @@ sim/
 ├── drive_loop.py               # manual scripted waypoint sweep (perception-only footage)
 ├── capture_sensor_views.py     # camera/LiDAR frame capture (Phase 2)
 ├── capture_autonomous_drive.py # top-down autonomous-drive frame capture (Phase 4)
-├── spawn_second_obstacle.py    # spawns a live obstacle mid-drive, forces a replan
 └── videos/                     # camera/LiDAR/autonomous-drive demo clips
 docs/
 └── learning-log.md       # the full build story, Context/Action/Result per step

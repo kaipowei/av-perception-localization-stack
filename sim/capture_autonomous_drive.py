@@ -54,20 +54,8 @@ class DriveCapture(Node):
         self.done = False
 
     def on_obstacles(self, msg: MarkerArray):
-        # obstacle_markers is published in the LiDAR's own frame, not world
-        # coordinates (see planner_bridge_node's on_obstacles for the full
-        # story) -- transform through the vehicle's current fused pose so
-        # this renders where the obstacle actually is, not where it'd be if
-        # the vehicle were still sitting at the origin facing along +x.
-        vx, vy, vyaw = self.pose
-        cos_yaw, sin_yaw = math.cos(vyaw), math.sin(vyaw)
         self.obstacles = [
-            (
-                vx + m.pose.position.x * cos_yaw - m.pose.position.y * sin_yaw,
-                vy + m.pose.position.x * sin_yaw + m.pose.position.y * cos_yaw,
-                m.scale.x, m.scale.y,
-            )
-            for m in msg.markers
+            (m.pose.position.x, m.pose.position.y, m.scale.x, m.scale.y) for m in msg.markers
         ]
 
     def on_path(self, msg: Path):

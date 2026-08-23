@@ -22,7 +22,7 @@ import math
 import subprocess
 
 import rclpy
-from faplanner.models.kinematic import KinematicBicycleModel, KinematicParams, KinematicState
+from faplanner.models.kinematic import KinematicBicycleModel, KinematicState
 from rclpy.node import Node
 from std_msgs.msg import Float64
 
@@ -40,17 +40,6 @@ class VehicleDriverNode(Node):
         self.declare_parameter("goal_y", 6.0)
         self.declare_parameter("goal_tol", 1.0)
         self.declare_parameter("steer_timeout_sec", 0.5)
-        # Pure Pursuit has no built-in cap, and a steer request well past
-        # what the vehicle can mechanically do isn't a request to honor --
-        # it's a sign the tracker has already diverged (found once, the
-        # hard way: a commanded angle climbing 40deg -> 62deg step by step
-        # while the vehicle kept falling further behind a path it
-        # physically couldn't turn tight enough for, which fed back into
-        # replan() finding no path at all once the vehicle drifted outside
-        # the planning bounds -- see learning-log entry 16). Treating an
-        # oversized request the same as a stale one and braking instead of
-        # committing to it is the fix.
-        self.declare_parameter("max_reasonable_steer_deg", 45.0)
 
         self.world = self.get_parameter("world").value
         self.vehicle_name = self.get_parameter("vehicle_name").value
@@ -61,7 +50,6 @@ class VehicleDriverNode(Node):
         self.goal_y = self.get_parameter("goal_y").value
         self.goal_tol = self.get_parameter("goal_tol").value
         self.steer_timeout_sec = self.get_parameter("steer_timeout_sec").value
-        self.max_reasonable_steer = math.radians(self.get_parameter("max_reasonable_steer_deg").value)
 
         # matches the vehicle's actual starting pose in test_track.sdf --
         # the EKF's own state_ also starts at Zero(), so this and the
@@ -101,26 +89,7 @@ class VehicleDriverNode(Node):
             (self.get_clock().now() - self.last_steer_stamp).nanoseconds / 1e9
             if self.last_steer_stamp is not None else math.inf
         )
-        stale = stamp_age > self.steer_timeout_sec
-        # a request past what the vehicle can mechanically do means the
-        # tracker has already diverged -- see the parameter comment above
-        # and learning-log entry 16. Two earlier attempts both failed in
-        # opposite directions: braking to a full stop deadlocked (at v=0,
-        # nearest_idx never advances, so Pure Pursuit keeps looking at the
-        # same unturned stretch of path and keeps demanding the same
-        # oversized angle forever); clipping the oversized angle down to
-        # the mechanical limit and creeping forward made it worse --
-        # holding close to max_steer for several consecutive steps just
-        # drives the vehicle in a tight circle (radius = wheelbase /
-        # tan(max_steer)) that never intersects the path it's supposedly
-        # tracking, so the divergence never resolves and the vehicle wanders
-        # far from where it started. Zeroing the steer (straight line, not a
-        # circle) while still creeping keeps the vehicle actually covering
-        # new ground -- new ground is what gives the next replan a
-        # different, hopefully saner, situation to work with.
-        diverged = abs(self.latest_steer) > self.max_reasonable_steer
-        distrust_steer = stale or diverged
-        if distrust_steer:
+        if stamp_age > self.steer_timeout_sec:
             self.latest_steer = 0.0
 
         dist_to_goal = math.hypot(self.goal_x - self.state.x, self.goal_y - self.state.y)
@@ -134,19 +103,8 @@ class VehicleDriverNode(Node):
             return
 
         # simple speed ramp toward nominal_speed, braking early as the goal
-        # gets close so the vehicle doesn't blow past it and turn around --
-        # and slowing to a crawl, not a dead stop, when the steer command
-        # can't be trusted. A full stop was the first fix here and it
-        # created the worse deadlock described above; a slow creep keeps
-        # the vehicle actually making progress while distrusting a bad
-        # command, instead of freezing in place waiting for a signal that
-        # can't arrive without the vehicle moving first.
-        if distrust_steer:
-            target_speed = 1.0
-        elif dist_to_goal > 3.0:
-            target_speed = self.nominal_speed
-        else:
-            target_speed = self.nominal_speed * 0.4
+        # gets close so the vehicle doesn't blow past it and turn around
+        target_speed = self.nominal_speed if dist_to_goal > 3.0 else self.nominal_speed * 0.4
         accel = max(-self.max_decel, min(self.max_accel, target_speed - self.state.v))
 
         self.state = self.model.step(self.state, accel=accel, steer_angle=self.latest_steer, dt=self.dt)
