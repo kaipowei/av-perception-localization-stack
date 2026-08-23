@@ -33,7 +33,7 @@ from faplanner.sim.closed_loop import nearest_index
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
-from std_msgs.msg import Float64
+from std_msgs.msg import Empty, Float64
 from visualization_msgs.msg import MarkerArray
 
 
@@ -85,6 +85,14 @@ class PlannerBridgeNode(Node):
 
         self.create_subscription(Odometry, "fused_odometry", self.on_odometry, 10)
         self.create_subscription(MarkerArray, "obstacle_markers", self.on_obstacles, 10)
+        # normally replanning just waits for the next periodic timer tick,
+        # which is fine for steady driving but too slow for reacting to a
+        # newly-appeared obstacle at this track's scale (a couple seconds'
+        # wait at ~3.3 m/s eats most of the runway between "obstacle shows
+        # up" and "vehicle gets there") -- this lets an external trigger
+        # (sim/spawn_second_obstacle.py) force an immediate replan instead
+        # of tuning distance thresholds to paper over a slow reaction
+        self.create_subscription(Empty, "force_replan", lambda _msg: self.replan(), 10)
 
         replan_period = self.get_parameter("replan_period_sec").value
         self.create_timer(replan_period, self.replan)
@@ -109,13 +117,34 @@ class PlannerBridgeNode(Node):
         # real obstacles here are chunky in both x and y, so a minimum on the
         # smaller axis filters the slivers out without touching the two real
         # boxes.
+        # obstacle_detector_node publishes these in the LiDAR's own frame
+        # (it just copies the input cloud's header -- see
+        # point_cloud_processor_node/obstacle_detector_node, neither ever
+        # sets frame_id to "odom"), i.e. positions relative to the vehicle,
+        # not world coordinates. Treating marker.pose.position directly as
+        # a world (x, y) only looked right because obstacle_1 sits close to
+        # the origin and the vehicle hadn't turned much by the time it got
+        # there -- with the vehicle's pose near identity, "vehicle frame"
+        # and "world frame" were nearly the same thing by coincidence. It
+        # fell apart for real once a second obstacle showed up further
+        # along the route, after the vehicle had already turned ~30-40deg:
+        # the reported position was off by meters, not centimeters. Fix is
+        # the actual frame transform, using the current fused pose.
+        if self.pose is None:
+            return
+        vx, vy, vyaw = self.pose
+        cos_yaw, sin_yaw = math.cos(vyaw), math.sin(vyaw)
+
         obstacles = []
         for marker in msg.markers:
             if min(marker.scale.x, marker.scale.y) < self.min_obstacle_extent:
                 continue
+            dx, dy = marker.pose.position.x, marker.pose.position.y
+            world_x = vx + dx * cos_yaw - dy * sin_yaw
+            world_y = vy + dx * sin_yaw + dy * cos_yaw
             half_x = marker.scale.x / 2.0 + self.obstacle_margin
             half_y = marker.scale.y / 2.0 + self.obstacle_margin
-            obstacles.append((marker.pose.position.x, marker.pose.position.y, half_x, half_y))
+            obstacles.append((world_x, world_y, half_x, half_y))
         self.obstacles = obstacles
 
     def is_free(self, x: float, y: float) -> bool:

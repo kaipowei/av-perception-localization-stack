@@ -964,3 +964,107 @@ contact with a real (or even a physics-simulated) vehicle's dynamics.
 Bridging to Gazebo's own dynamic vehicle plugins, or CARLA, to check how
 the same planner/controller stack holds up once real tire slip and
 suspension are in the loop, is a natural next step this doesn't attempt.
+
+---
+
+## 15. A second obstacle mid-drive, and a coordinate-frame bug that had been sitting there the whole time
+
+**Context.** Entry 14's demo works, but it's a single dodge — the planner
+knows about both obstacles from frame one, so it never really has to react
+to anything, it just plans around a scene it already understood. Wanted one
+clip that actually shows perception → replan → correction happening live:
+spawn a second obstacle partway through the drive, right in the vehicle's
+path, and watch it notice and adjust.
+
+**Spawning a live obstacle.** Gazebo has a real service for this —
+`/world/<world>/create`, `gz.msgs.EntityFactory`, same request-response
+pattern as `set_pose`. Wrote `sim/spawn_second_obstacle.py`: inserts a
+static box via the same protobuf text-format request `drive_loop.py`
+already uses for teleporting, just a different service. Confirmed it
+worked with `gz model --list` before wiring it into anything else — cheap
+to check, would've been a bad node in which to debug this blind.
+
+**Bug 1 — a position-triggered spawn fired 2+ seconds later than the
+vehicle's actual position justified.** First version watched
+`fused_odometry` and spawned once the vehicle was near a target distance
+from where the new obstacle would go. Worked, technically, but the
+obstacle appeared only ~1m ahead of the vehicle by the time it did — no
+real reaction room. Cause: this script is its own fresh ROS2 node, and
+`rclpy`'s DDS discovery (matching up with `fused_odometry`'s publisher)
+took a couple of real seconds after the process started, during which the
+vehicle kept moving without anyone watching. Position-based logic was
+sound; the trigger just wasn't seeing the vehicle's *current* position, it
+was seeing wherever the vehicle had been a couple seconds before discovery
+finished. Fixed by switching to a fixed delay instead, calibrated once
+against a real run's timestamps — sidesteps discovery latency entirely
+since it doesn't depend on receiving anything from the vehicle at all.
+
+**Bug 2 — waiting for the next periodic replan wasted most of the reaction
+window anyway.** Even with better timing on the spawn, `replan_period_sec`
+is 2.0s (entry 14's own fix for a different problem) — at ~3.3 m/s that's
+most of the runway between "obstacle appears" and "vehicle arrives" spent
+waiting for a timer. Added a `force_replan` topic: `planner_bridge_node`
+now replans immediately on receiving an `Empty` message on it, and
+`spawn_second_obstacle.py` publishes one right after spawning (with a
+0.4s pause first, so `obstacle_detector_node` has one real LiDAR cycle to
+actually see the new box before the forced replan runs against a stale,
+empty-ish obstacle list). This is the more honest fix anyway — a real
+reactive system shouldn't be relying on a fixed polling interval to notice
+something in its path.
+
+**Bug 3 (the real find) — `obstacle_markers` was never in world
+coordinates, and nothing had caught it.** With both timing bugs fixed, the
+recorded video showed the second obstacle rendering in the wrong place —
+not a small offset, meters off, nowhere near `(5.5, 3.3)`. Checked the
+actual Gazebo state directly (`gz model -m obstacle_dynamic -p`): the
+entity really was at `(5.5, 3.3)`. So the spawn was fine; the *reported*
+position downstream wasn't. Traced it to
+`obstacle_detector_node.cpp`/`point_cloud_processor_node.cpp`: both just
+copy `msg->header` straight through from the raw LiDAR scan, and neither
+ever sets `frame_id` to `"odom"` — meaning `obstacle_markers` has always
+been published in the LiDAR's own (vehicle-relative) frame, not world
+coordinates. `planner_bridge_node`'s `on_obstacles` was taking
+`marker.pose.position.x/y` and using it directly as a world-frame `(x, y)`
+— which happened to look right for the very first obstacle in entry 13's
+and entry 14's demos purely by coincidence: the vehicle starts at the
+origin facing along +x, so early on, "vehicle frame" and "world frame" are
+nearly identical, and `obstacle_1` sits close enough to the start that the
+vehicle hadn't turned much by the time it got there. The bug was real from
+the very first bridge-node test — it just never had a chance to show up
+until an obstacle appeared farther into a route with real heading change
+behind it.
+
+Fixed with an actual frame transform in `on_obstacles`, using the
+vehicle's current fused pose:
+
+```python
+vx, vy, vyaw = self.pose
+world_x = vx + dx * cos(vyaw) - dy * sin(vyaw)
+world_y = vy + dx * sin(vyaw) + dy * cos(vyaw)
+```
+
+(`dx, dy` being the marker's reported position, i.e. the offset in the
+vehicle's own frame). Same fix applied to `capture_autonomous_drive.py`'s
+own obstacle rendering, which had the identical bug for the identical
+reason. Re-recorded after the fix: the second obstacle now renders exactly
+where `gz model -p` says it actually is, and the driven trail visibly bends
+around both obstacles in the right places instead of the first video's
+obstacle marker floating somewhere it wasn't.
+
+**Result.** Full run with a live second obstacle: vehicle dodges
+`obstacle_1` as before, keeps going, a new box appears in its path about 6
+seconds in, `obstacle_markers` count visibly jumps (2 → 4 → 8 as more of it
+comes into view), a forced replan fires within 0.4s of the spawn, and the
+driven trail curves around the new obstacle too before reaching the goal —
+all captured in `sim/videos/autonomous_drive_phase4_double_obstacle.mp4`,
+checked frame by frame the same way entry 14's video was, this time
+specifically confirming the second obstacle's on-screen position against
+the coordinates the spawn request actually used.
+
+Worth being honest about scope here too: this fixes where obstacles are
+*reported* to the planner. It doesn't add occlusion, sensor noise on the
+new object specifically, or anything resembling a real "dynamic obstacle
+detection" pipeline — the box is static once it exists, and the vehicle
+simply hadn't perceived it before because it didn't exist yet. Good enough
+to prove the reactive-replanning path actually works; not a claim about
+tracking genuinely moving obstacles.
