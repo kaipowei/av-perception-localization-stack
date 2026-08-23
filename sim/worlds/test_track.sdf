@@ -11,6 +11,7 @@
     </plugin>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"></plugin>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"></plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"></plugin>
 
     <light type="directional" name="sun">
       <cast_shadows>true</cast_shadows>
@@ -153,6 +154,12 @@
             <image><width>640</width><height>480</height></image>
             <clip><near>0.1</near><far>50</far></clip>
           </camera>
+          <always_on>true</always_on>
+        </sensor>
+
+        <sensor name="imu" type="imu">
+          <topic>imu</topic>
+          <update_rate>100</update_rate>
           <always_on>true</always_on>
         </sensor>
       </link>

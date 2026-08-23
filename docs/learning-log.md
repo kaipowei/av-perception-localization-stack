@@ -565,6 +565,59 @@ bound, which is what this phase set out to build.
 
 ---
 
+## 9. IMU + EKF fusion — and a fifth bug that only showed up once a second sensor was added
+
+**Context.** Added an IMU sensor to the vehicle (`gz-sim-imu-system` plugin
++ an `imu`-type sensor in the SDF) and a new `ekf_fusion_node`: a 3-state
+[x, y, yaw] EKF that predicts with gyro-integrated yaw (fast, smooth, no
+absolute reference) and corrects with the ICP odometry from section 8 (slower,
+occasionally a bad single-frame estimate, but doesn't drift on its own) —
+the same predict-with-one-sensor / correct-with-another pattern as
+friction-aware-planner's EKF, applied to pose instead of friction/sideslip.
+
+**A fifth bug, only visible with two sensors running.** First full-loop run:
+ICP alone was accurate (yaw implicitly correct, since position tracked well),
+but the *fused* estimate's yaw was off by 33 degrees (-1.36 rad vs the true
+-0.785 rad) and got stuck there for the rest of the run rather than
+correcting. Added temporary debug logging of the ICP-measured yaw fed into
+the EKF each step and found it: `drive_loop.py` initialized its internal
+`current_yaw` tracker to segment 1's own heading (0.785 rad) instead of the
+vehicle's actual starting heading in the SDF (0 rad) — meaning the very
+first pose command jumped the vehicle 45 degrees in a single frame, the
+exact same "true angular displacement exceeds what ICP can find
+correspondences for" failure as bug 3 in section 8, just on the very first
+frame instead of a later corner, where the per-corner rotation fix from
+that section never got applied. Fixed by initializing `current_yaw = 0.0`
+so the first transition gets the same gradual in-place rotation as every
+other corner.
+
+This is worth noting as a category, not just a one-off: bug 3 was
+"fixed" in the sense that the full-loop test passed afterward, but the fix
+only covered the *symptom that was being tested for*. The same root cause
+(instant heading snap) had a second instance the test didn't happen to
+exercise until a different consumer (the EKF, sensitive to a persistent
+yaw bias in a way the ICP-alone position metric wasn't) made it visible.
+
+**Result after the fix**, full loop, ground truth (0, 0), yaw -0.785:
+
+| | x | y | position error | yaw |
+|---|---|---|---|---|
+| ICP alone | 0.29 | -0.44 | 0.53m (~1.26%) | (implicit, not logged directly) |
+| EKF fused | 0.20 | -0.39 | 0.44m (~1.04%) | -0.57 (0.21 rad / ~12° off) |
+
+The fused estimate's *position* is now measurably better than ICP alone —
+this is the actual point of fusion, not a symmetry exercise: IMU-predicted
+yaw between ICP updates smooths out exactly the kind of occasional bad
+single-frame ICP estimate that section 8 spent four bugs getting right.
+Yaw still carries a residual ~12° offset, down from 33° but not zero;
+diminishing returns past this point (tuning process/measurement noise
+ratios further, or chasing whatever's left of the initial-heading
+transient) weren't worth chasing further given the position result already
+demonstrates the fusion is doing real work, honestly reported rather than
+tuned until the number looked clean.
+
+---
+
 ## 2. Installing CUDA hit a wall that had nothing to do with this project
 
 **Context.** Before writing the GPU kernel, the CUDA compiler (`nvcc`)

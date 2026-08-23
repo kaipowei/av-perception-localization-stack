@@ -21,6 +21,7 @@ find_package(nav_msgs REQUIRED)
 find_package(MPI REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL 1.12 REQUIRED COMPONENTS common registration segmentation filters sample_consensus)
+find_package(Eigen3 REQUIRED)
 
 set(EXTRA_PCL_CONVERSIONS_LIB "")
 if(TARGET pcl_conversions::pcl_conversions)
@@ -37,8 +38,17 @@ target_link_libraries(scan_matcher_node
 )
 target_include_directories(scan_matcher_node PRIVATE ${PCL_INCLUDE_DIRS} ${pcl_conversions_INCLUDE_DIRS})
 
+add_executable(ekf_fusion_node src/ekf_fusion_node.cpp)
+target_link_libraries(ekf_fusion_node
+  rclcpp::rclcpp
+  sensor_msgs::sensor_msgs
+  nav_msgs::nav_msgs
+  Eigen3::Eigen
+)
+
 install(TARGETS
   scan_matcher_node
+  ekf_fusion_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

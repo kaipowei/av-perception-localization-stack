@@ -38,18 +38,21 @@ downsampled points, obstacle markers, and 2D detections).
 Phase 3 (in progress): `fa_localization_cpp`'s `scan_matcher_node` does
 frame-to-frame LiDAR odometry (ICP between consecutive scans, accumulated
 into a pose estimate), constrained to planar (x, y, yaw) motion since this
-is a ground vehicle. Verified against Gazebo's ground truth over a full
-~42m loop: ~0.54m final position error (~1.3% of distance traveled), a
-credible number for uncorrected frame-to-frame odometry. Getting there
-took four real bugs, each found by testing a single known motion instead
-of debugging the full loop directly — see
-[docs/learning-log.md](docs/learning-log.md) section 8 for the full
-"test a known-answer case first" story (a too-tight correspondence
-distance with no initial guess, an inverted transform sign, corners
-snapping the heading instead of turning gradually, and unconstrained
-z/roll/pitch drifting despite the vehicle having no physical way to move
-in those directions). EKF fusion with the existing IMU estimator and
-closing the loop into the friction-aware planner are still ahead.
+is a ground vehicle, verified against Gazebo's ground truth at ~0.54m
+final position error over a ~42m loop (~1.3%). `ekf_fusion_node` fuses
+that with a new IMU sensor (gyro-integrated yaw as the predict step, ICP
+as the correction) — the fused estimate's position (0.44m error, ~1.04%)
+is measurably better than ICP alone (0.53m, ~1.26%), the actual point of
+fusion rather than a symmetry exercise. See
+[docs/learning-log.md](docs/learning-log.md) sections 8-9 for the full
+"test a known-answer case first" debugging story — five real bugs total
+(a too-tight ICP correspondence distance with no initial guess, an
+inverted transform sign, corners snapping the heading instead of turning
+gradually, unconstrained z/roll/pitch drifting despite the vehicle having
+no physical way to move in those directions, and — found only once the
+EKF made a persistent yaw bias visible — the very first frame silently
+having the same instant-heading-snap bug as the corners). Closing the loop
+into the friction-aware planner is still ahead.
 
 See [docs/learning-log.md](docs/learning-log.md) for the full Phase 1/2
 story too, including why the dev environment ended up as Ubuntu 24.04 +

@@ -41,7 +41,11 @@ def main():
     # sweep overall -- pass a smaller step explicitly for that use.
     step = float(sys.argv[2]) if len(sys.argv) > 2 else STEP
 
-    current_yaw = math.atan2(WAYPOINTS[1][1] - WAYPOINTS[0][1], WAYPOINTS[1][0] - WAYPOINTS[0][0])
+    # The vehicle's actual starting heading in the SDF is 0 -- start the
+    # tracked yaw there too (not segment 1's direction) so the very first
+    # transition gets the same gradual in-place rotation as every other
+    # corner, instead of silently snapping 45 degrees on frame one.
+    current_yaw = 0.0
     for (x0, y0), (x1, y1) in zip(WAYPOINTS, WAYPOINTS[1:]):
         target_yaw = math.atan2(y1 - y0, x1 - x0)
 
