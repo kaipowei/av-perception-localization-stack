@@ -431,6 +431,140 @@ being caught by the bounds check — fixed alongside the OpenCV rewrite).
 
 ---
 
+## 7. Phase 3, first attempt: point-to-point ICP fails on a ground-dominated scene
+
+**Context.** First localization test: `scan_matcher_node` (new package
+`fa_localization_cpp`) runs `pcl::IterativeClosestPoint` between
+consecutive downsampled scans and accumulates the relative transforms into
+a running pose estimate, tested by driving the fixed loop
+`(0,0)->(6,6)->(6,-6)->(-6,-6)->(-6,6)->(0,0)` with a fine step (0.3m,
+via `drive_loop.py test_track 0.3` — the coarse 2m steps used for demo
+videos move too far between consecutive LiDAR frames for ICP to find
+correct correspondences) and comparing the final estimate against
+Gazebo's ground-truth pose (`gz model -m vehicle -p`).
+
+**A false alarm first.** The first run showed the ICP estimate wildly off
+*and* Gazebo's own reported end pose not matching the loop's known end
+point (0,0) either. Cause: a Gazebo GUI instance from earlier manual-drag
+testing in this session had never actually been killed (an earlier
+`pkill -f "gz sim"` had self-matched its own command line and killed
+itself instead — see section 6's "gz sim" self-match gotcha, same failure
+mode again) and was still running, colliding with the freshly-launched
+headless instance on the same world name and confusing which instance the
+bridge/queries were actually talking to. Killed the stray GUI process by
+exact PID, confirmed exactly one `gz sim` process running, and re-ran:
+Gazebo's ground truth then matched the loop exactly (start (0,0,0.2,yaw=0),
+end (0,0,0.2,yaw=-0.785) — a full precise loop closure, as expected).
+
+**The real problem.** With ground truth now trustworthy, the gap was
+obvious: real end pose (0, 0), ICP's estimate (-28.18, 5.57) — off by
+~29m over one loop, and drifting in *z* as well, which shouldn't happen at
+all for a vehicle that only ever moves in the ground plane. The z-drift is
+the tell: this room's point clouds are mostly ground plane (established
+back in Phase 2, section 3 — most points are the floor). Plain
+point-to-point ICP matching two scans that are both mostly the same flat
+plane has almost no gradient constraining translation *within* that
+plane — sliding a point cloud sideways across a matching flat floor barely
+changes point-to-point distances, so the optimizer has little information
+about how far it actually moved and can drift off in directions (like z)
+that a sane solution never would. This is a known, well-documented failure
+mode of point-to-point ICP on plane-dominated scenes, not a bug in the
+accumulation math or the inverse-transform convention.
+
+**Fix, part 1:** reuse Phase 2's already-verified ground-plane removal
+(`obstacle_detector_node`'s RANSAC largest-plane removal) inside
+`scan_matcher_node` *before* handing scans to ICP, so matching only ever
+sees wall/obstacle points. Applied, then re-tested on the full loop —
+result got *worse* (52m error, up from 29m). Ground removal wasn't wrong
+in principle, but it wasn't the dominant bug either, and it made the
+point sets sparser, which made the real problem (next section) worse.
+
+---
+
+## 8. Three more bugs before ICP odometry actually worked, found by testing single known motions instead of guessing on the full loop
+
+Debugging the full 122-second loop directly wasn't working — every fix
+attempt either did nothing or made it worse, with no way to tell why from
+a single aggregate "off by 29m" number. Switched strategy: command one
+single, exactly-known motion (a 2m teleport in +x, nothing else) and
+compare ICP's single-step estimate against it directly. This is what
+actually cracked it — three separate, real bugs, each found by making the
+test smaller and more controlled, not by reasoning harder about the big
+one.
+
+**Bug 1 — `max_correspondence_distance` too tight, and no initial guess.**
+The single 2m-teleport test showed ICP reporting `converged=true,
+fitness≈2.35` (a bad fit) then contributing essentially zero motion to the
+pose estimate — confirmed by adding temporary debug logging of point
+counts and fitness per frame. Root cause: `setMaxCorrespondenceDistance`
+was 0.5m, meaning ICP can only match a point to another point within 0.5m
+of it. When the *true* displacement between two scans exceeds that (a 2m
+jump, but also true during any moment where consecutive scans just happen
+to differ by more than 0.5m), ICP has no way to discover the correct
+correspondence at all — it "converges" to whatever the few
+within-threshold correspondences suggest, silently wrong rather than
+erroring. Fixed by raising the threshold (0.5 -> 2.0m default) and, more
+importantly, seeding `icp.align()` with the *previous* step's estimated
+transform as an initial guess (constant-velocity assumption) instead of
+identity — this alone makes correspondence search start from roughly the
+right place instead of "assume nothing moved."
+
+**Bug 2 — inverted transform, a sign flip.** With bug 1 fixed, the single
+2m teleport produced a *magnitude*-correct estimate (~1.96m, ~2% error)
+but the *sign* was backwards (-1.96 instead of +1.96). The original code
+inverted `icp.getFinalTransformation()` on the reasoning "it maps the new
+scan onto the old scan's frame, which is the opposite of how the vehicle
+moved." That reasoning was wrong: working through the math properly — a
+world-fixed point observed from the new pose sits at
+`P_new = P_world - motion`, and ICP's `T` solves `T * P_new ≈ P_old = P_world`,
+so `T = +motion` directly, no inversion needed. Removed the `.inverse()`
+call; the single-step test then matched ground truth almost exactly.
+
+**Bug 3 — corners snap the heading instantly, same failure as bug 1 but
+for rotation.** Single-step translation now worked, but the full loop
+still drifted badly (+64m after bug 1+2 fixes) — worse than before fixing
+bugs 1 and 2, in fact. `drive_loop.py`'s corners set the new segment's yaw
+on the very *first* pose of the new segment, meaning the vehicle's heading
+jumps up to ~90 degrees between two consecutive LiDAR frames at every one
+of the loop's 4 corners. Same problem as bug 1, just for rotation instead
+of translation: the true angular displacement exceeds what ICP can
+discover correspondences for in one step. Fixed by rotating the vehicle in
+place in small (10 degree) steps at each corner before starting to
+translate along the next segment, so no single frame-to-frame gap ever
+requires a large heading change. Result: full-loop error dropped to about
+5.5m (from 64m) — proof this was real, but the remaining ~5.5m pointed at
+one more thing.
+
+**Bug 4 (not really a bug) — z, roll, and pitch have no physical meaning
+for this vehicle.** With bugs 1-3 fixed, x/y tracked ground truth to
+within ~5m over the loop, but z had drifted to +20m — impossible for a
+vehicle that only ever moves in the ground plane. Point-to-point ICP has
+no way to know that; it happily returns a full 6-DOF rigid transform even
+when 3 of those DOF have no physical basis in this scenario, and small
+per-frame noise in those directions compounds like any other drift.
+Fixed not by debugging *why* ICP finds spurious z/roll/pitch motion, but
+by not letting it matter: `constrainToPlanarMotion()` projects every
+per-frame transform onto x, y, and yaw only before it's used for anything
+(both composing the global pose and seeding the next frame's initial
+guess). This is a standard simplification for ground vehicles (SE(2)
+instead of full SE(3)), not a workaround for an unexplained bug — the
+vehicle's actual motion model genuinely only has 3 degrees of freedom.
+
+**Final result**, full loop, ground truth (0, 0) -> (0, 0):
+
+```
+final ICP estimate: x=0.32 y=-0.44 z=0.00
+```
+
+~0.54m position error over a ~42m loop (~1.3%), z exactly zero throughout.
+For frame-to-frame LiDAR odometry with no map and no loop closure, drift
+in the 0.5-2% of distance traveled range is a normal, credible result —
+this isn't SLAM yet (nothing corrects accumulated error against a map),
+but it's a working localization estimate with a measured, honest error
+bound, which is what this phase set out to build.
+
+---
+
 ## 2. Installing CUDA hit a wall that had nothing to do with this project
 
 **Context.** Before writing the GPU kernel, the CUDA compiler (`nvcc`)

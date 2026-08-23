@@ -33,13 +33,29 @@ Phase 2 complete: a Gazebo (Harmonic) test world with a simulated LiDAR +
 camera, ground segmentation + Euclidean clustering (PCL) on the
 GPU-downsampled cloud, a YOLO-based camera detector (`fa_perception_py`),
 and a recorded rosbag dataset (116.5s / 3677 messages across LiDAR,
-downsampled points, obstacle markers, and 2D detections). See
-[docs/learning-log.md](docs/learning-log.md) for the full story, including
-why the dev environment ended up as Ubuntu 24.04 + ROS2 Jazzy + CUDA 12.6,
-and two real-sensor-data problems (NaN "no-return" LiDAR points, the
-vehicle detecting its own chassis) that never showed up with Phase 1's
-synthetic data. Phase 3 (ICP-based localization/SLAM, fused with the
-friction-aware planner's EKF) is next.
+downsampled points, obstacle markers, and 2D detections).
+
+Phase 3 (in progress): `fa_localization_cpp`'s `scan_matcher_node` does
+frame-to-frame LiDAR odometry (ICP between consecutive scans, accumulated
+into a pose estimate), constrained to planar (x, y, yaw) motion since this
+is a ground vehicle. Verified against Gazebo's ground truth over a full
+~42m loop: ~0.54m final position error (~1.3% of distance traveled), a
+credible number for uncorrected frame-to-frame odometry. Getting there
+took four real bugs, each found by testing a single known motion instead
+of debugging the full loop directly — see
+[docs/learning-log.md](docs/learning-log.md) section 8 for the full
+"test a known-answer case first" story (a too-tight correspondence
+distance with no initial guess, an inverted transform sign, corners
+snapping the heading instead of turning gradually, and unconstrained
+z/roll/pitch drifting despite the vehicle having no physical way to move
+in those directions). EKF fusion with the existing IMU estimator and
+closing the loop into the friction-aware planner are still ahead.
+
+See [docs/learning-log.md](docs/learning-log.md) for the full Phase 1/2
+story too, including why the dev environment ended up as Ubuntu 24.04 +
+ROS2 Jazzy + CUDA 12.6, and two real-sensor-data problems (NaN "no-return"
+LiDAR points, the vehicle detecting its own chassis) that never showed up
+with Phase 1's synthetic data.
 
 ## Requirements
 
