@@ -79,6 +79,36 @@ Three ROS2 packages, split by concern:
 | `fa_localization_cpp` | C++17 | ICP scan-matching odometry, IMU/ICP EKF fusion |
 | `fa_bridge_py` | Python | plans with Hybrid-A*, drives with Pure Pursuit, runs MPC as a friction-aware advisory, actuates via a kinematic model |
 
+## Results
+
+Three numbers pulled straight out of `docs/learning-log.md`, not written for
+this README — plain matplotlib, no styling pass.
+
+**GPU only wins past ~100k points.** Same voxel-grid bucketing rule, one CPU
+implementation, one GPU one (entry 4) — below the crossover the GPU's
+kernel-launch and memory-transfer overhead costs more than the compute
+saves, so the CPU reference actually wins there. Above it the GPU pulls
+ahead, up to 4.5x by a million points.
+
+![GPU vs CPU downsample time, log-log, crossover around 100k points](docs/figures/gpu_vs_cpu.png)
+
+**Ground segmentation + clustering catches every false positive without
+touching the real obstacles.** Raw clustering on a real LiDAR scan flagged 7
+objects, not 2 (entry 6) — four wall slivers and the vehicle detecting its
+own chassis, on top of the two real boxes. Two filters (drop points inside
+the sensor's min-range, drop clusters wider than a real obstacle) remove
+all five false positives without touching either real detection.
+
+![Cluster count before and after two perception filters, 7 down to 2](docs/figures/perception_filtering.png)
+
+**Fusing IMU with ICP beats ICP alone.** Checked against Gazebo's own
+ground truth over the same ~42m loop (entry 12): ICP alone lands 0.53m off
+(~1.3% of the loop), fusing gyro-predicted heading between ICP updates
+brings that to 0.44m (~1.0%). Not a symmetry exercise — the fused estimate
+is measurably better, which is the actual point of doing fusion at all.
+
+![Position error, ICP alone vs IMU-fused, 0.53m down to 0.44m](docs/figures/localization_fusion.png)
+
 ## Status
 
 - **Phase 1 — done.** CUDA voxel-grid downsampler, hand-written kernel not
