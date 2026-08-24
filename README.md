@@ -5,7 +5,7 @@ LiDAR point clouds and camera frames go in, obstacle detections and a
 fused pose estimate come out — all simulated in Gazebo.
 
 Companion project to
-[friction-aware-planner](https://github.com/kaipowei/friction-aware-planner)
+[friction-aware-planner](https://github.com/kaipowei/friction-aware-adaptive-motion-planner-ros2)
 (motion planning + friction-aware speed control). That project deliberately
 scoped perception and SLAM *out* to keep its own story tight — its
 `ROADMAP.md` says it directly: "Explicitly out of scope: Full SLAM
@@ -146,9 +146,9 @@ every current CUDA release's bundled headers).
 - `fa_bridge_py` needs its own venv, separate from the rest of the stack
   (`python3 -m venv --system-site-packages`) with `friction-aware-planner`
   installed in it — its `cvxpy`/`scipy` dependencies need numpy>=2, which
-  conflicts with the numpy<2 pin above; see entry 13. `friction-aware-planner`
-  is currently a private repo, so `pip install git+https://github.com/kaipowei/friction-aware-planner`
-  only works with access to it — installing from a local clone works too.
+  conflicts with the numpy<2 pin above; see entry 13:
+  `pip install git+https://github.com/kaipowei/friction-aware-adaptive-motion-planner-ros2`
+  (installing from a local clone works too).
 - Built and run inside WSL2 Ubuntu 24.04 on Windows
 
 ## Quick start
