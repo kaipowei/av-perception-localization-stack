@@ -1,5 +1,13 @@
 # av-perception-localization-stack
 
+![Same autonomous drive, three synced views: top-down planned path + trail, the vehicle's own camera, and a top-down LiDAR scan](sim/videos/three_views_synced.gif)
+
+Same run, same timestamps, not three separate takes cut together — top-down
+(planned path + driven trail), the vehicle's own camera, and a top-down
+LiDAR scan, all off one actual autonomous drive. The full single-obstacle
+result (top-down only, whole run) is
+[sim/videos/autonomous_drive_phase4.mp4](sim/videos/autonomous_drive_phase4.mp4).
+
 C++17 / CUDA / ROS2 perception + localization stack for a ground vehicle:
 LiDAR point clouds and camera frames go in, obstacle detections and a
 fused pose estimate come out — all simulated in Gazebo.
@@ -27,6 +35,36 @@ for why the name says "localization" and not "SLAM."
 [docs/learning-log.md](docs/learning-log.md) has the full step-by-step
 record of what got built, why, and what came out of it — written to
 double as interview prep.
+
+## Results
+
+Three numbers pulled straight out of `docs/learning-log.md`, not written for
+this README — plain matplotlib, no styling pass.
+
+**GPU only wins past ~100k points.** Same voxel-grid bucketing rule, one CPU
+implementation, one GPU one (entry 4) — below the crossover the GPU's
+kernel-launch and memory-transfer overhead costs more than the compute
+saves, so the CPU reference actually wins there. Above it the GPU pulls
+ahead, up to 4.5x by a million points.
+
+![GPU vs CPU downsample time, log-log, crossover around 100k points](docs/figures/gpu_vs_cpu.png)
+
+**Ground segmentation + clustering catches every false positive without
+touching the real obstacles.** Raw clustering on a real LiDAR scan flagged 7
+objects, not 2 (entry 6) — four wall slivers and the vehicle detecting its
+own chassis, on top of the two real boxes. Two filters (drop points inside
+the sensor's min-range, drop clusters wider than a real obstacle) remove
+all five false positives without touching either real detection.
+
+![Cluster count before and after two perception filters, 7 down to 2](docs/figures/perception_filtering.png)
+
+**Fusing IMU with ICP beats ICP alone.** Checked against Gazebo's own
+ground truth over the same ~42m loop (entry 12): ICP alone lands 0.53m off
+(~1.3% of the loop), fusing gyro-predicted heading between ICP updates
+brings that to 0.44m (~1.0%). Not a symmetry exercise — the fused estimate
+is measurably better, which is the actual point of doing fusion at all.
+
+![Position error, ICP alone vs IMU-fused, 0.53m down to 0.44m](docs/figures/localization_fusion.png)
 
 ## Architecture
 
@@ -81,36 +119,6 @@ Three ROS2 packages, split by concern:
 | `fa_perception_py` | Python | camera 2D detection (YOLO) |
 | `fa_localization_cpp` | C++17 | ICP scan-matching odometry, IMU/ICP EKF fusion |
 | `fa_bridge_py` | Python | plans with Hybrid-A*, drives with Pure Pursuit, runs MPC as a friction-aware advisory, actuates via a kinematic model |
-
-## Results
-
-Three numbers pulled straight out of `docs/learning-log.md`, not written for
-this README — plain matplotlib, no styling pass.
-
-**GPU only wins past ~100k points.** Same voxel-grid bucketing rule, one CPU
-implementation, one GPU one (entry 4) — below the crossover the GPU's
-kernel-launch and memory-transfer overhead costs more than the compute
-saves, so the CPU reference actually wins there. Above it the GPU pulls
-ahead, up to 4.5x by a million points.
-
-![GPU vs CPU downsample time, log-log, crossover around 100k points](docs/figures/gpu_vs_cpu.png)
-
-**Ground segmentation + clustering catches every false positive without
-touching the real obstacles.** Raw clustering on a real LiDAR scan flagged 7
-objects, not 2 (entry 6) — four wall slivers and the vehicle detecting its
-own chassis, on top of the two real boxes. Two filters (drop points inside
-the sensor's min-range, drop clusters wider than a real obstacle) remove
-all five false positives without touching either real detection.
-
-![Cluster count before and after two perception filters, 7 down to 2](docs/figures/perception_filtering.png)
-
-**Fusing IMU with ICP beats ICP alone.** Checked against Gazebo's own
-ground truth over the same ~42m loop (entry 12): ICP alone lands 0.53m off
-(~1.3% of the loop), fusing gyro-predicted heading between ICP updates
-brings that to 0.44m (~1.0%). Not a symmetry exercise — the fused estimate
-is measurably better, which is the actual point of doing fusion at all.
-
-![Position error, ICP alone vs IMU-fused, 0.53m down to 0.44m](docs/figures/localization_fusion.png)
 
 ## Status
 
@@ -244,5 +252,6 @@ sim/
 ├── capture_autonomous_drive.py # top-down autonomous-drive frame capture (Phase 4)
 └── videos/                     # camera/LiDAR/autonomous-drive demo clips
 docs/
+├── figures/              # benchmark charts referenced in Results
 └── learning-log.md       # the full build story, Context/Action/Result per step
 ```
