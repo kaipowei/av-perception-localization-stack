@@ -964,3 +964,40 @@ contact with a real (or even a physics-simulated) vehicle's dynamics.
 Bridging to Gazebo's own dynamic vehicle plugins, or CARLA, to check how
 the same planner/controller stack holds up once real tire slip and
 suspension are in the loop, is a natural next step this doesn't attempt.
+
+---
+
+## 15. Renaming the repo: the explanation entry 0 never gave
+
+**Context.** Entry 0's title says "what 'SLAM' actually means here" and
+never actually explains it — the entry only covers why this became a
+separate repo. Meanwhile entries 11 and 13 both plainly say "not SLAM
+yet." The repo was still named `av-perception-slam-stack`, and this
+README's own resume-gap line claimed the project closes a
+"SLAM/localization/mapping" gap. Those don't agree with each other, and
+it's exactly the kind of contradiction an interviewer who actually reads
+this log would catch.
+
+**The answer entry 0 owed.** SLAM is Simultaneous Localization *and*
+Mapping. `scan_matcher_node` only ever compares two consecutive LiDAR
+frames and keeps a running pose from the accumulated relative transforms
+— it never assembles those scans into a persistent map, and there's no
+loop closure (no check for "have I been here before" to correct drift on
+revisit). That's the mapping half of SLAM, and this repo never built it.
+What's here is frame-to-frame localization with IMU fusion (entries
+10-12), checked against ground truth with an honest, measured error bound
+— a real result, just not the result the old name claimed.
+
+**Action.** Renamed the repo `av-perception-slam-stack` →
+`av-perception-localization-stack` (GitHub's own redirect keeps the old
+URL working). Fixed the README title and the resume-gap line to say
+"localization," not "SLAM/mapping." Left entry 0's own text alone — it's
+an accurate record of what I decided and why at the time, and this log
+doesn't rewrite entries after the fact (see the note at the top of this
+file); this entry is that same "next entry corrects it" pattern, just
+applied to a naming mistake instead of a code bug.
+
+**Result.** The repo name, the README, and every entry in this log now
+agree: perception and localization are real and measured, full SLAM (a
+persistent map, loop closure) is a named, honest gap, not a word left
+over in the title from before I'd checked what it actually meant.
