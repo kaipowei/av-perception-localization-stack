@@ -2,8 +2,9 @@
 
 This file exists for one reason: so that six months from now, in an
 interview, I can explain every piece of this project — not just "I did
-LiDAR perception and SLAM" but why I picked each technique, what problem it
-actually solves, and what the numbers say about whether it worked. Each
+LiDAR perception and localization" but why I picked each technique, what
+problem it actually solves, and what the numbers say about whether it
+worked. Each
 entry is roughly Context / Action / Result. Entries are numbered and I
 don't go back and edit them after the fact — if something later turns out
 to be wrong, the next entry says so and links back, same as git history
