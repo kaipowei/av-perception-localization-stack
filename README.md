@@ -28,6 +28,16 @@ for why the name says "localization" and not "SLAM."
 record of what got built, why, and what came out of it — written to
 double as interview prep.
 
+## Demo
+
+[sim/videos/three_views_synced.mp4](sim/videos/three_views_synced.mp4) —
+one actual autonomous drive, three views side by side: top-down (planned
+path + driven trail), the vehicle's own camera, and a top-down LiDAR scan.
+Same run, same timestamps, not three separate takes cut together — each
+panel is encoded at that sensor's own real capture rate so they stay in
+sync. The full single-obstacle result (top-down only, whole run) is
+[sim/videos/autonomous_drive_phase4.mp4](sim/videos/autonomous_drive_phase4.mp4).
+
 ## Architecture
 
 ```mermaid
