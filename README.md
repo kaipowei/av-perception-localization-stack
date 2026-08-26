@@ -187,11 +187,25 @@ every current CUDA release's bundled headers).
 ## Quick start
 
 ```bash
-# build
+# build (once)
 cd ros2_ws
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
-source install/setup.bash
+cd ..
 
+# then, one command: launches the simulator, sensor bridge, perception,
+# localization, planner, and driver together, and tears the whole thing
+# down cleanly on Ctrl+C
+FA_BRIDGE_VENV=~/path/to/venv/bin/python3 bash sim/run_demo.sh
+```
+
+`run_demo.sh` is what actually runs end to end when someone else clones this
+— the five-terminal walkthrough below is for seeing what each piece is
+doing individually, not the recommended way to run it.
+
+<details>
+<summary>Five-terminal manual walkthrough (for inspecting individual nodes)</summary>
+
+```bash
 # terminal 1 — simulator (headless; drop --headless-rendering for the GUI)
 gz sim -s -r --headless-rendering ../sim/worlds/test_track.sdf
 
@@ -229,6 +243,8 @@ ffmpeg -framerate 10 -i /tmp/drive_capture/frames/%05d.png \
   -c:v libx264 -pix_fmt yuv420p ../sim/videos/autonomous_drive_phase4.mp4
 ```
 
+</details>
+
 ## Repository layout
 
 ```
@@ -238,6 +254,7 @@ ros2_ws/src/
 ├── fa_localization_cpp/  # ICP odometry, EKF fusion
 └── fa_bridge_py/         # feeds fused pose + obstacles into friction-aware-planner
 sim/
+├── run_demo.sh                 # one-command launch: sim + bridge + full stack
 ├── worlds/test_track.sdf       # Gazebo world: walls, obstacles, vehicle + sensors
 ├── drive_loop.py               # manual scripted waypoint sweep (perception-only footage)
 ├── capture_sensor_views.py     # camera/LiDAR frame capture (Phase 2)
