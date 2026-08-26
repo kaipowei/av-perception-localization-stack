@@ -24,14 +24,6 @@ dependency between the two repos — `friction-aware-planner` is pulled in
 as a pip dependency (its Hybrid-A* planner and MPC controller, unmodified),
 not forked or copied.
 
-Built to close a specific resume gap: production C++ and CUDA experience,
-and sensor-fusion localization, things robotics-software and AV-engineer
-internship postings ask for (NVIDIA's AV & Robotics internship included)
-that I didn't have a project backing up. Full SLAM — a persistent map,
-loop closure — is a real gap this doesn't close; see
-[entry 15](docs/learning-log.md#15-renaming-the-repo-the-explanation-entry-0-never-gave)
-for why the name says "localization" and not "SLAM."
-
 [docs/learning-log.md](docs/learning-log.md) has the full step-by-step
 record of what got built, why, and what came out of it — written to
 double as interview prep.
